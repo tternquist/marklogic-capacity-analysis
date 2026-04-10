@@ -164,49 +164,6 @@ def insert_batch(client, database, batch_num, batch_size, global_offset):
     return result[0] if result else 0
 
 
-def eval_javascript(self, javascript, database=None, vars=None):
-    """POST to /v1/eval for Server-Side JavaScript."""
-    from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
-    from urllib.error import HTTPError
-
-    path = "/v1/eval"
-    if database:
-        path += f"?database={database}"
-
-    body_parts = {"javascript": javascript}
-    if vars:
-        body_parts["vars"] = json.dumps(vars)
-
-    body = urlencode(body_parts).encode()
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-    }
-
-    if self.auth_type == "basic":
-        headers["Authorization"] = self._basic_auth_header()
-
-    try:
-        req = Request(self.base + path, data=body, headers=headers, method="POST")
-        with urlopen(req) as resp:
-            return self._parse_eval_response(resp.read().decode())
-    except HTTPError as e:
-        if e.code != 401 or self.auth_type == "basic":
-            raise
-        auth_header = e.headers.get("WWW-Authenticate", "")
-        if "Digest" not in auth_header:
-            raise
-        headers["Authorization"] = self._digest_response(auth_header, "POST", path)
-        req = Request(self.base + path, data=body, headers=headers, method="POST")
-        with urlopen(req) as resp:
-            return self._parse_eval_response(resp.read().decode())
-
-
-# Monkey-patch eval_javascript onto MarkLogicClient
-MarkLogicClient.eval_javascript = eval_javascript
-
-
 # ── Metric sampling ──────────────────────────────────────────────────
 
 SAMPLE_XQ = """

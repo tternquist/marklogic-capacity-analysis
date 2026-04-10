@@ -209,6 +209,44 @@ class MarkLogicClient:
             with urlopen(req) as resp:
                 return self._parse_eval_response(resp.read().decode())
 
+    def eval_javascript(self, javascript, database=None, vars=None):
+        """POST to /v1/eval for Server-Side JavaScript evaluation."""
+        from urllib.parse import urlencode
+
+        path = "/v1/eval"
+        if database:
+            path += f"?database={database}"
+
+        body_parts = {"javascript": javascript}
+        if vars:
+            body_parts["vars"] = json.dumps(vars)
+
+        body = urlencode(body_parts).encode()
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+
+        if self.auth_type == "basic":
+            headers["Authorization"] = self._basic_auth_header()
+
+        try:
+            req = Request(self.base + path, data=body, headers=headers, method="POST")
+            with urlopen(req) as resp:
+                return self._parse_eval_response(resp.read().decode())
+        except HTTPError as e:
+            if e.code != 401 or self.auth_type == "basic":
+                raise
+            auth_header = e.headers.get("WWW-Authenticate", "")
+            if "Digest" not in auth_header:
+                raise
+            headers["Authorization"] = self._digest_response(
+                auth_header, "POST", path
+            )
+            req = Request(self.base + path, data=body, headers=headers, method="POST")
+            with urlopen(req) as resp:
+                return self._parse_eval_response(resp.read().decode())
+
     def _parse_eval_response(self, text):
         """Parse multipart/mixed eval response into JSON values."""
         results = []
@@ -661,6 +699,215 @@ def report_index_config(client, database):
     return props, total_range, len(enabled)
 
 
+def report_index_memory(client, database):
+    """Per-index memory and disk usage using xdmp.forestStatus('memoryDetail').
+
+    Requires MarkLogic 11+ and ML_ALLOW_EVAL=true.
+    Uses xdmp.databaseDescribeIndexes() for index definitions and
+    xdmp.forestStatus(forests, 'memoryDetail') for per-stand, per-index
+    memory and on-disk byte counts. Aggregates across all stands.
+
+    Also shows the per-stand memorySummary breakdown (list, tree, range
+    indexes, triple index, timestamps, etc.) which explains where
+    forest memory is being consumed.
+    """
+    header(f"INDEX MEMORY USAGE: {database}")
+
+    try:
+        results = client.eval_javascript(_INDEX_MEMORY_JS, database=database,
+                                         vars={"dbName": database})
+        if not results:
+            print("    Could not retrieve index memory data")
+            return
+
+        data = results[0]
+        indexes = data.get("indexes", [])
+        stand_summaries = data.get("standSummaries", [])
+
+        # ── Per-stand memory summary ────────────────────────────────
+        sub_header("Stand Memory Breakdown")
+
+        # Sum across stands for the aggregate
+        agg = {}
+        for ss in stand_summaries:
+            summary = ss.get("summary", {})
+            for k, v in summary.items():
+                agg[k] = agg.get(k, 0) + (v or 0)
+
+        total_stand_mem = sum(ss.get("memorySize", 0) or 0 for ss in stand_summaries)
+        total_stand_disk = sum(ss.get("diskSize", 0) or 0 for ss in stand_summaries)
+
+        kv("Stands",            len(stand_summaries))
+        kv("Total disk",        fmt_mb(total_stand_disk))
+        kv("Total memory",      fmt_mb(total_stand_mem))
+        print()
+
+        # Show component breakdown (sorted by size descending)
+        component_labels = {
+            "rangeIndexesBytes":            "Range indexes",
+            "timestampsFileBytes":          "Timestamps",
+            "uniqueKeyIndexBytes":          "Unique key index",
+            "uriKeyIndexBytes":             "URI key index",
+            "linkKeysFileBytes":            "Link keys",
+            "ordinalsFileBytes":            "Ordinals",
+            "uniqKeysFileBytes":            "Unique keys",
+            "uriKeysFileBytes":             "URI keys",
+            "tripleIndexBytes":             "Triple index",
+            "qualitiesFileBytes":           "Qualities",
+            "lengthsFileBytes":             "Lengths",
+            "listFileBytes":                "List index",
+            "treeFileBytes":                "Tree index",
+            "frequenciesFileBytes":         "Frequencies",
+            "reverseIndexBytes":            "Reverse index",
+            "geoSpatialRegionIndexesBytes": "Geospatial region",
+            "binaryKeysFileBytes":          "Binary keys",
+            "linkKeyIndexBytes":            "Link key index",
+            "stopKeySetFileBytes":          "Stop key set",
+        }
+
+        sorted_components = sorted(agg.items(), key=lambda x: x[1], reverse=True)
+        total_bytes = sum(v for _, v in sorted_components) or 1
+
+        for key, bytes_val in sorted_components:
+            if bytes_val == 0:
+                continue
+            label = component_labels.get(key, key)
+            pct = bytes_val / total_bytes * 100
+            mb = bytes_val / (1024 * 1024)
+            kv(label, f"{mb:>8.2f} MB  ({pct:>5.1f}%)")
+
+        # ── Per-index memory usage ──────────────────────────────────
+        sub_header("Per-Index Memory & Disk")
+
+        # Group by index type
+        by_type = {}
+        for idx in indexes:
+            t = idx.get("indexType", "unknown")
+            if t not in by_type:
+                by_type[t] = []
+            by_type[t].append(idx)
+
+        type_labels = {
+            "uriLexicon":          "URI Lexicon",
+            "collectionLexicon":   "Collection Lexicon",
+            "rangeElementIndex":   "Element Range Index",
+            "rangePathIndex":      "Path Range Index",
+            "rangeFieldIndex":     "Field Range Index",
+            "geospatialPathIndex": "Geospatial Path Index",
+        }
+
+        grand_mem = 0
+        grand_disk = 0
+
+        for idx_type, items in by_type.items():
+            type_label = type_labels.get(idx_type, idx_type)
+            print()
+            print(f"    {color(type_label, BOLD)}")
+
+            for idx in sorted(items, key=lambda x: x.get("totalMemoryBytes", 0), reverse=True):
+                mem_b  = idx.get("totalMemoryBytes", 0) or 0
+                disk_b = idx.get("totalOnDiskBytes", 0) or 0
+                grand_mem  += mem_b
+                grand_disk += disk_b
+
+                name = idx.get("localname") or idx_type
+                ns   = idx.get("namespaceURI", "")
+                st   = idx.get("scalarType", "")
+
+                name_str = name
+                if st:
+                    name_str += f" ({st})"
+                if ns:
+                    name_str += f"  {color(ns, DIM)}"
+
+                mem_str  = fmt_mb(mem_b / (1024 * 1024))  if mem_b  else "n/a"
+                disk_str = fmt_mb(disk_b / (1024 * 1024)) if disk_b else "n/a"
+
+                print(f"      {color('>', CYAN)} {name_str}")
+                print(f"        Memory: {mem_str:>12}    Disk: {disk_str:>12}")
+
+        print()
+        kv("Total index memory",  fmt_mb(grand_mem / (1024 * 1024)))
+        kv("Total index on-disk", fmt_mb(grand_disk / (1024 * 1024)))
+
+    except Exception as e:
+        print(f"    Could not retrieve index memory usage: {e}")
+        print(f"    (Requires ML 11+ and ML_ALLOW_EVAL=true)")
+
+
+_INDEX_MEMORY_JS = """
+var db = xdmp.database(dbName);
+
+// 1. Get all index definitions with their IDs
+var indexDefs = xdmp.databaseDescribeIndexes(db).toObject();
+var allIndexes = [];
+Object.keys(indexDefs).forEach(function(type) {
+  var items = indexDefs[type];
+  if (!Array.isArray(items)) items = [items];
+  items.forEach(function(idx) {
+    if (idx.indexId) {
+      idx.indexType = type;
+      allIndexes.push(idx);
+    }
+  });
+});
+
+// 2. Get forest statuses with memoryDetail
+var forests = xdmp.databaseForests(db);
+var statuses = xdmp.forestStatus(forests, 'memoryDetail').toArray();
+
+// 3. Aggregate per-index memory and disk across all stands
+var indexTotals = {};
+var standSummaries = [];
+
+statuses.forEach(function(statusNode) {
+  var s = statusNode.toObject();
+  var stands = s.stands;
+  if (!stands) return;
+  var standArr = Array.isArray(stands) ? stands : [stands];
+  standArr.forEach(function(stand) {
+    if (stand.memorySummary) {
+      standSummaries.push({
+        standPath: stand.path,
+        diskSize: stand.diskSize,
+        memorySize: stand.memorySize,
+        summary: stand.memorySummary
+      });
+    }
+    if (stand.memoryDetail && stand.memoryDetail.memoryRangeIndexes) {
+      var indexes = stand.memoryDetail.memoryRangeIndexes.index;
+      if (!indexes) return;
+      if (!Array.isArray(indexes)) indexes = [indexes];
+      indexes.forEach(function(idx) {
+        var id = String(idx.indexId);
+        if (!indexTotals[id]) indexTotals[id] = { memBytes: 0, diskBytes: 0 };
+        indexTotals[id].memBytes += (idx.indexMemoryBytes || 0);
+        indexTotals[id].diskBytes += (idx.indexOnDiskBytes || 0);
+      });
+    }
+  });
+});
+
+// 4. Join
+var report = allIndexes.map(function(def) {
+  var totals = indexTotals[String(def.indexId)] || { memBytes: 0, diskBytes: 0 };
+  return {
+    indexType: def.indexType,
+    localname: def.localname || null,
+    namespaceURI: def.namespaceURI || null,
+    scalarType: def.scalarType || null,
+    pathExpression: def.pathExpression || null,
+    indexId: def.indexId,
+    totalMemoryBytes: totals.memBytes,
+    totalOnDiskBytes: totals.diskBytes
+  };
+});
+
+var result = { indexes: report, standSummaries: standSummaries };
+result;
+"""
+
+
 def report_capacity_estimate(database, db_props, forest_data, host_data):
     header(f"CAPACITY ESTIMATE: {database}")
 
@@ -911,7 +1158,10 @@ def main():
         # 5. Index configuration
         db_props, range_count, enabled_count = report_index_config(client, args.database)
 
-        # 6. Capacity estimation
+        # 6. Index memory usage (per-index and per-component breakdown)
+        report_index_memory(client, args.database)
+
+        # 7. Capacity estimation
         report_capacity_estimate(args.database, db_props, forest_data, host_data)
 
         print()
