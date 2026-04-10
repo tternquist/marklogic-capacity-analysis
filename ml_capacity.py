@@ -776,6 +776,25 @@ def report_index_memory(client, database):
     """
     header(f"INDEX MEMORY USAGE: {database}")
 
+    # Check preload-mapped-data setting
+    try:
+        db_config = client.get_json(
+            f"/manage/v2/databases/{database}/properties?format=json"
+        )
+        preload = db_config.get("preload-mapped-data", False)
+    except Exception:
+        preload = None
+
+    if preload is False:
+        print()
+        print(f"    {color('!', YELLOW)} {color('preload-mapped-data is DISABLED', YELLOW + BOLD)}")
+        print(f"    {color('  Range index memory numbers below may underreport.', DIM)}")
+        print(f"    {color('  Without preload, index data is only loaded into memory on', DIM)}")
+        print(f"    {color('  first query — not on forest open. Enable it for accurate', DIM)}")
+        print(f"    {color('  memory reporting:', DIM)}")
+        print(f"    {color('  Admin UI: Database > Settings > preload mapped data = true', DIM)}")
+        print()
+
     try:
         results = client.eval_javascript(_INDEX_MEMORY_JS, database=database,
                                          vars={"dbName": database})
@@ -1568,6 +1587,7 @@ def collect_snapshot(client, database):
         "in_memory_tree_size":   db_props.get("in-memory-tree-size", 64),
         "in_memory_range_index_size": db_props.get("in-memory-range-index-size", 8),
         "in_memory_triple_index_size": db_props.get("in-memory-triple-index-size", 21),
+        "preload_mapped_data":   db_props.get("preload-mapped-data", False),
     }
 
     # Count indexes
@@ -1726,6 +1746,7 @@ def extract_config_fingerprint(snap):
         "in_memory_tree_size":   db_props.get("in_memory_tree_size"),
         "in_memory_range_index_size": db_props.get("in_memory_range_index_size"),
         "in_memory_triple_index_size": db_props.get("in_memory_triple_index_size"),
+        "preload_mapped_data":  db_props.get("preload_mapped_data"),
         "range_element_indexes": idx_counts.get("range_element", 0),
         "range_path_indexes":    idx_counts.get("range_path", 0),
         "range_field_indexes":   idx_counts.get("range_field", 0),
@@ -1842,6 +1863,7 @@ def report_config_drift(snaps):
         "in_memory_tree_size":       "In-memory tree size (MB)",
         "in_memory_range_index_size":"In-memory range index size (MB)",
         "in_memory_triple_index_size":"In-memory triple index size (MB)",
+        "preload_mapped_data":       "Preload mapped data (range indexes loaded on forest open)",
         "range_element_indexes":     "Element range index count",
         "range_path_indexes":        "Path range index count",
         "range_field_indexes":       "Field range index count",
@@ -2413,17 +2435,35 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
         def log_message(self, format, *args):
             pass  # suppress default access logs
 
+        def _parse_request(self):
+            """Parse URL into path and query params."""
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            return parsed.path, params
+
+        def _get_db_filter(self, params):
+            """Extract optional database filter from query params."""
+            vals = params.get("database", [])
+            return vals[0] if vals else None
+
         def do_GET(self):
-            path = self.path.split("?")[0]
+            path, params = self._parse_request()
+            db_filter = self._get_db_filter(params)
 
             if path == "/metrics":
                 self._serve_metrics()
             elif path == "/api/snapshot":
-                self._serve_json_snapshot()
+                self._serve_json_snapshot(db_filter)
             elif path == "/api/snapshots":
-                self._serve_json_snapshots_list()
+                self._serve_json_snapshots_list(db_filter)
             elif path == "/api/trend":
-                self._serve_json_trend()
+                self._serve_json_trend(db_filter)
+            elif path == "/api/databases":
+                self._serve_json_databases()
+            elif path.startswith("/api/snapshot/"):
+                filename = path[len("/api/snapshot/"):]
+                self._serve_json_snapshot_file(filename)
             elif path == "/":
                 self._serve_ui()
             elif path == "/health":
@@ -2431,27 +2471,55 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
             else:
                 self._respond(404, "text/plain", "Not Found")
 
+        def do_POST(self):
+            path, params = self._parse_request()
+            if path == "/api/snapshot":
+                self._handle_take_snapshot()
+            else:
+                self._respond(404, "text/plain", "Not Found")
+
+        def do_DELETE(self):
+            path, params = self._parse_request()
+            if path.startswith("/api/snapshots/"):
+                filename = path[len("/api/snapshots/"):]
+                self._handle_delete_snapshot(filename)
+            else:
+                self._respond(404, "text/plain", "Not Found")
+
+        def do_OPTIONS(self):
+            """Handle CORS preflight for DELETE/POST."""
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
         def _serve_metrics(self):
             with lock:
                 all_metrics = []
                 for db, snap in latest_snapshots.items():
                     all_metrics.append(snapshot_to_prometheus(snap))
-            body = "\n".join(all_metrics) if all_metrics else "# No data collected yet\n"
-            self._respond(200, "text/plain; version=0.0.4; charset=utf-8", body)
+            body = "\n".join(all_metrics) if all_metrics else \
+                "# No data collected yet\n"
+            self._respond(200,
+                          "text/plain; version=0.0.4; charset=utf-8", body)
 
-        def _serve_json_snapshot(self):
+        def _serve_json_snapshot(self, db_filter=None):
             with lock:
-                if latest_snapshots:
-                    db = list(latest_snapshots.keys())[0]
-                    snap = latest_snapshots[db]
-                    self._respond(200, "application/json",
-                                  json.dumps(snap, indent=2, default=str))
+                if db_filter and db_filter in latest_snapshots:
+                    snap = latest_snapshots[db_filter]
+                elif latest_snapshots:
+                    snap = list(latest_snapshots.values())[0]
                 else:
                     self._respond(503, "application/json",
                                   '{"error":"No data collected yet"}')
+                    return
+                self._respond(200, "application/json",
+                              json.dumps(snap, indent=2, default=str))
 
-        def _serve_json_snapshots_list(self):
-            all_snaps = load_snapshots()
+        def _serve_json_snapshots_list(self, db_filter=None):
+            all_snaps = load_snapshots(database=db_filter)
             summary = []
             for s in all_snaps:
                 t = s.get("totals", {})
@@ -2462,13 +2530,13 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
                     "forest_disk_mb": t.get("forest_disk_mb", 0),
                     "host_forest_mb": t.get("host_forest_mb", 0),
                     "host_rss_mb": t.get("host_rss_mb", 0),
+                    "file": s.get("_file"),
                 })
             self._respond(200, "application/json",
                           json.dumps(summary, indent=2, default=str))
 
-        def _serve_json_trend(self):
-            # Return time-series data for charting
-            all_snaps = load_snapshots()
+        def _serve_json_trend(self, db_filter=None):
+            all_snaps = load_snapshots(database=db_filter)
             points = []
             for s in all_snaps:
                 t = s.get("totals", {})
@@ -2480,12 +2548,99 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
                     "host_forest_mb": t.get("host_forest_mb", 0),
                     "host_rss_mb": t.get("host_rss_mb", 0),
                     "active_fragments": t.get("active_fragments", 0),
+                    "deleted_fragments": t.get("deleted_fragments", 0),
                     "system_total_mb": t.get("system_total_mb", 0),
                     "host_cache_mb": t.get("host_cache_mb", 0),
                     "host_base_mb": t.get("host_base_mb", 0),
+                    "host_file_mb": t.get("host_file_mb", 0),
                 })
             self._respond(200, "application/json",
                           json.dumps(points, indent=2, default=str))
+
+        def _serve_json_databases(self):
+            db_names = set(latest_snapshots.keys())
+            for s in load_snapshots():
+                db_name = s.get("database")
+                if db_name:
+                    db_names.add(db_name)
+            self._respond(200, "application/json",
+                          json.dumps(sorted(db_names), default=str))
+
+        def _serve_json_snapshot_file(self, filename):
+            """Serve full snapshot JSON for a specific file."""
+            if ".." in filename or "/" in filename \
+                    or not filename.endswith(".json"):
+                self._respond(400, "application/json",
+                              '{"error":"Invalid filename"}')
+                return
+            fpath = SNAPSHOT_DIR / filename
+            if not fpath.exists():
+                self._respond(404, "application/json",
+                              '{"error":"Snapshot not found"}')
+                return
+            try:
+                with open(fpath) as f:
+                    data = json.load(f)
+                self._respond(200, "application/json",
+                              json.dumps(data, indent=2, default=str))
+            except (json.JSONDecodeError, OSError) as e:
+                self._respond(500, "application/json",
+                              json.dumps({"error": str(e)}))
+
+        def _handle_delete_snapshot(self, filename):
+            """Delete a snapshot file."""
+            if ".." in filename or "/" in filename \
+                    or not filename.endswith(".json"):
+                self._respond(400, "application/json",
+                              '{"error":"Invalid filename"}')
+                return
+            fpath = SNAPSHOT_DIR / filename
+            if not fpath.exists():
+                self._respond(404, "application/json",
+                              '{"error":"Snapshot not found"}')
+                return
+            try:
+                fpath.unlink()
+                self._respond(200, "application/json",
+                              '{"status":"deleted"}')
+            except OSError as e:
+                self._respond(500, "application/json",
+                              json.dumps({"error": str(e)}))
+
+        def _handle_take_snapshot(self):
+            """Trigger an immediate snapshot collection."""
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len) if content_len else b"{}"
+                req = json.loads(body) if body else {}
+            except (json.JSONDecodeError, ValueError):
+                req = {}
+
+            db = req.get("database") or (
+                list(latest_snapshots.keys())[0] if latest_snapshots
+                else databases[0] if databases else "Documents"
+            )
+
+            try:
+                snap = collect_snapshot(client, db)
+                save_snapshot(snap)
+                with lock:
+                    latest_snapshots[db] = snap
+                t = snap.get("totals", {})
+                summary = {
+                    "status": "ok",
+                    "timestamp": snap.get("timestamp"),
+                    "database": db,
+                    "documents": t.get("documents", 0),
+                }
+                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
+                      f"Manual snapshot {db}: "
+                      f"{t.get('documents', 0):,} docs")
+                self._respond(200, "application/json",
+                              json.dumps(summary, indent=2, default=str))
+            except Exception as e:
+                self._respond(500, "application/json",
+                              json.dumps({"error": str(e)}))
 
         def _serve_ui(self):
             self._respond(200, "text/html", _WEB_UI_HTML)
