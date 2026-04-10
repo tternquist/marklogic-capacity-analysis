@@ -1,177 +1,188 @@
 {
-  "dashboard": {
-    "title": "MLCA — MarkLogic Capacity Analysis",
-    "uid": "mlca-capacity",
-    "tags": ["marklogic", "capacity", "mlca"],
-    "timezone": "browser",
-    "refresh": "1m",
-    "time": { "from": "now-7d", "to": "now" },
-    "panels": [
-      {
-        "title": "Memory Headroom",
-        "type": "stat",
-        "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
-        "targets": [{ "expr": "mlca_memory_headroom_mb", "legendFormat": "{{database}}" }],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "decmbytes",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                { "color": "red", "value": null },
-                { "color": "red", "value": 0 },
-                { "color": "yellow", "value": 2048 },
-                { "color": "green", "value": 4096 }
-              ]
-            }
+  "title": "MLCA — MarkLogic Capacity Analysis",
+  "uid": "mlca-capacity",
+  "schemaVersion": 39,
+  "tags": ["marklogic", "capacity", "mlca"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": { "from": "now-7d", "to": "now" },
+  "panels": [
+    {
+      "title": "Memory Headroom",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "mlca_memory_headroom_mb", "legendFormat": "{{database}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 2048 },
+              { "color": "green", "value": 4096 }
+            ]
           }
         }
-      },
-      {
-        "title": "Memory Ceiling Usage",
-        "type": "gauge",
-        "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
-        "targets": [{ "expr": "mlca_memory_utilization_ratio * 100", "legendFormat": "{{database}}" }],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "percent",
-            "min": 0,
-            "max": 100,
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                { "color": "green", "value": null },
-                { "color": "yellow", "value": 70 },
-                { "color": "red", "value": 85 }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "title": "Documents",
-        "type": "stat",
-        "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
-        "targets": [{ "expr": "mlca_documents_total", "legendFormat": "{{database}}" }],
-        "fieldConfig": { "defaults": { "unit": "short" } }
-      },
-      {
-        "title": "Fragmentation",
-        "type": "stat",
-        "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
-        "targets": [{ "expr": "mlca_fragmentation_ratio * 100", "legendFormat": "{{database}}" }],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "percent",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                { "color": "green", "value": null },
-                { "color": "yellow", "value": 10 },
-                { "color": "red", "value": 25 }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "title": "Swap Usage",
-        "type": "stat",
-        "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
-        "targets": [{ "expr": "mlca_host_swap_mb", "legendFormat": "{{host}}" }],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "decmbytes",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                { "color": "green", "value": null },
-                { "color": "red", "value": 1 }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "title": "Forest Memory Over Time",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-        "targets": [
-          { "expr": "mlca_host_forest_mb", "legendFormat": "Forest Memory" },
-          { "expr": "mlca_memory_ceiling_mb - mlca_memory_fixed_mb", "legendFormat": "Forest Ceiling" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decmbytes" } },
-        "options": {
-          "legend": { "displayMode": "list" }
-        }
-      },
-      {
-        "title": "RSS Over Time",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
-        "targets": [
-          { "expr": "mlca_host_rss_mb", "legendFormat": "RSS ({{host}})" },
-          { "expr": "mlca_memory_ceiling_mb", "legendFormat": "Ceiling (80% RAM)" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decmbytes" } }
-      },
-      {
-        "title": "Memory Breakdown",
-        "type": "barchart",
-        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
-        "targets": [
-          { "expr": "mlca_host_cache_mb", "legendFormat": "Cache (fixed)" },
-          { "expr": "mlca_host_base_mb", "legendFormat": "Base (fixed)" },
-          { "expr": "mlca_host_forest_mb", "legendFormat": "Forest (grows)" },
-          { "expr": "mlca_host_file_mb", "legendFormat": "File cache" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decmbytes" } },
-        "options": { "stacking": { "mode": "normal" } }
-      },
-      {
-        "title": "Document Growth",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
-        "targets": [
-          { "expr": "mlca_documents_total", "legendFormat": "Documents ({{database}})" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "short" } }
-      },
-      {
-        "title": "Disk Usage",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
-        "targets": [
-          { "expr": "mlca_forest_disk_mb", "legendFormat": "Disk Used" },
-          { "expr": "mlca_disk_remaining_mb", "legendFormat": "Disk Remaining" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decmbytes" } }
-      },
-      {
-        "title": "Per-Index Memory",
-        "type": "table",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
-        "targets": [
-          { "expr": "mlca_index_memory_bytes", "legendFormat": "{{index}}", "format": "table", "instant": true }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decbytes" } },
-        "transformations": [
-          { "id": "organize", "options": { "excludeByName": { "Time": true } } }
-        ]
-      },
-      {
-        "title": "Stand Memory Components",
-        "type": "piechart",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
-        "targets": [
-          { "expr": "mlca_stand_range_indexes_bytes", "legendFormat": "Range Indexes" },
-          { "expr": "mlca_stand_triple_index_bytes", "legendFormat": "Triple Index" },
-          { "expr": "mlca_stand_timestamps_bytes", "legendFormat": "Timestamps" },
-          { "expr": "mlca_stand_list_bytes", "legendFormat": "List Index" },
-          { "expr": "mlca_stand_tree_bytes", "legendFormat": "Tree Index" }
-        ],
-        "fieldConfig": { "defaults": { "unit": "decbytes" } }
       }
-    ]
-  }
+    },
+    {
+      "title": "Memory Ceiling Usage",
+      "type": "gauge",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "mlca_memory_utilization_ratio * 100", "legendFormat": "{{database}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Documents",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "mlca_documents_total", "legendFormat": "{{database}}" }],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "title": "Fragmentation",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "mlca_fragmentation_ratio * 100", "legendFormat": "{{database}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 25 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Swap Usage",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "mlca_host_swap_mb", "legendFormat": "{{host}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Forest Memory Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_host_forest_mb", "legendFormat": "Forest Memory" },
+        { "refId": "B", "expr": "mlca_memory_ceiling_mb - mlca_memory_fixed_mb", "legendFormat": "Forest Ceiling" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } },
+      "options": {
+        "legend": { "displayMode": "list" }
+      }
+    },
+    {
+      "title": "RSS Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_host_rss_mb", "legendFormat": "RSS ({{host}})" },
+        { "refId": "B", "expr": "mlca_memory_ceiling_mb", "legendFormat": "Ceiling (80% RAM)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "title": "Memory Breakdown",
+      "type": "barchart",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_host_cache_mb", "legendFormat": "Cache (fixed)" },
+        { "refId": "B", "expr": "mlca_host_base_mb", "legendFormat": "Base (fixed)" },
+        { "refId": "C", "expr": "mlca_host_forest_mb", "legendFormat": "Forest (grows)" },
+        { "refId": "D", "expr": "mlca_host_file_mb", "legendFormat": "File cache" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } },
+      "options": { "stacking": { "mode": "normal" } }
+    },
+    {
+      "title": "Document Growth",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_documents_total", "legendFormat": "Documents ({{database}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "title": "Disk Usage",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_forest_disk_mb", "legendFormat": "Disk Used" },
+        { "refId": "B", "expr": "mlca_disk_remaining_mb", "legendFormat": "Disk Remaining" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "title": "Per-Index Memory",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_index_memory_bytes", "legendFormat": "{{index}}", "format": "table", "instant": true }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+      ]
+    },
+    {
+      "title": "Stand Memory Components",
+      "type": "piechart",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        { "refId": "A", "expr": "mlca_stand_range_indexes_bytes", "legendFormat": "Range Indexes" },
+        { "refId": "B", "expr": "mlca_stand_triple_index_bytes", "legendFormat": "Triple Index" },
+        { "refId": "C", "expr": "mlca_stand_timestamps_bytes", "legendFormat": "Timestamps" },
+        { "refId": "D", "expr": "mlca_stand_list_bytes", "legendFormat": "List Index" },
+        { "refId": "E", "expr": "mlca_stand_tree_bytes", "legendFormat": "Tree Index" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decbytes" } }
+    }
+  ]
 }
