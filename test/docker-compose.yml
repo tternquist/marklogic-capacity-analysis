@@ -1,0 +1,41 @@
+# MLCA Test Environment — MarkLogic instance with constrained memory
+#
+# Memory is limited to 4 GB so the memory ceiling (80% = 3.2 GB) is
+# reachable with a modest number of documents (~500K–1M), making it
+# practical to validate memory runway projections in minutes rather
+# than loading millions of documents.
+#
+# Usage:
+#   docker compose up -d
+#   python3 test_harness.py           # runs the full validation
+#   docker compose down -v            # tear down + delete data
+
+services:
+  marklogic:
+    image: progressofficial/marklogic-db:latest
+    container_name: mlca-test
+    ports:
+      - "8100:8000"   # Query Console
+      - "8101:8001"   # Admin Interface
+      - "8102:8002"   # Management API
+    environment:
+      MARKLOGIC_INIT: "true"
+      MARKLOGIC_ADMIN_USERNAME: "admin"
+      MARKLOGIC_ADMIN_PASSWORD: "admin"
+      MARKLOGIC_WALLET_PASSWORD: "admin"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    mem_limit: 4g
+    volumes:
+      - mlca_data:/var/opt/MarkLogic
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/admin/v1/timestamp"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  mlca_data:

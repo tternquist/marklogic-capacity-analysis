@@ -1090,10 +1090,15 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
         if total_docs > 0 and forest_mem > 0:
             forest_bytes_per_doc = (forest_mem * 1024 * 1024) / total_docs
             print()
-            print(f"    {color('Forest memory indicator (secondary — fluctuates with merges)', BOLD)}")
-            kv("  Forest memory/doc (snapshot)", f"{forest_bytes_per_doc:,.0f} bytes", indent=6)
-            kv("  Note", color("Forest memory includes cached stand pages that compress", DIM), indent=6)
-            kv("      ", color("during merges. Use --trend for growth-rate projections.", DIM), indent=6)
+            print(f"    {color('Memory runway (use --trend for growth-rate projection)', BOLD)}")
+            kv("  Current forest memory",         fmt_mb(forest_mem), indent=6)
+            kv("  Forest headroom",               fmt_mb(forest_headroom), indent=6)
+            kv("  Forest memory/doc (snapshot)",   f"{forest_bytes_per_doc:,.0f} bytes", indent=6)
+            print()
+            print(f"      {color('Memory is the binding constraint in most deployments.', YELLOW)}")
+            print(f"      {color('Forest memory fluctuates with merges — point-in-time snapshots', DIM)}")
+            print(f"      {color('can over- or under-estimate. For reliable memory runway:', DIM)}")
+            print(f"      {color('take snapshots over time, then run: --trend', BOLD)}")
 
         elif total_docs == 0:
             kv("  No documents loaded yet", "load docs to establish per-doc baseline", indent=6)
@@ -1542,18 +1547,70 @@ def report_trend(database):
     span  = (last["ts"] - first["ts"]).total_seconds()
     days  = span / 86400 if span > 0 else 0
 
-    sub_header("Growth Over Time")
+    # ── Memory runway (primary) ──────────────────────────────────
+    # Memory is the binding constraint in the vast majority of ML
+    # deployments. Disk is easy to add; memory is not. Lead with it.
+
+    sys_total   = last["sys_total"]
+    cache_mb    = last["cache_mb"]
+    base_mb     = last["base_mb"]
+    file_mb     = last["file_mb"]
+    forest_now  = last["forest_mb"]
+    fixed_mem   = cache_mb + base_mb + file_mb
+    ceiling     = sys_total * 0.80
+    headroom    = ceiling - fixed_mem - forest_now
+
+    forest_delta = last["forest_mb"] - first["forest_mb"]
+    doc_delta    = last["docs"]      - first["docs"]
+    disk_delta   = last["disk_mb"]   - first["disk_mb"]
+
+    sub_header("Memory Runway (primary — most deployments are memory-bound)")
+    kv("System RAM",                fmt_mb(sys_total))
+    kv("Fixed memory (cache+base)", fmt_mb(fixed_mem))
+    kv("Current forest memory",     fmt_mb(forest_now))
+    mem_used_pct = ((fixed_mem + forest_now) / ceiling * 100) if ceiling else 0
+    kv("Memory ceiling (80% RAM)",  f"{fmt_mb(ceiling)}  {bar(mem_used_pct)}")
+    kv("Forest headroom",          f"{fmt_mb(headroom)}  {status_badge(headroom > 1024, 'OK', 'LOW')}")
+
+    if days > 0 and forest_delta > 0 and headroom > 0:
+        daily_forest = forest_delta / days
+        days_until_mem = headroom / daily_forest
+        print()
+        kv("Forest memory growth",  f"{fmt_mb(first['forest_mb'])} → {fmt_mb(forest_now)}  "
+                                    f"{color('+' + fmt_mb(forest_delta), YELLOW)}")
+        kv("Growth rate",           f"{color(fmt_mb(daily_forest) + '/day', BOLD)}")
+        kv("Observed period",       f"{days:.1f} days ({len(points)} snapshots)")
+        if doc_delta > 0:
+            forest_bytes_per_doc = (forest_delta * 1024 * 1024) / doc_delta
+            kv("Marginal cost/doc", f"{forest_bytes_per_doc:,.0f} bytes forest memory per doc")
+            docs_until_ceil = int((headroom * 1024 * 1024) / forest_bytes_per_doc)
+            kv("Est. docs until ceiling", f"{color(f'{docs_until_ceil:,}', BOLD)}")
+        print()
+        print(f"    {color('>>> ', RED)}{color(f'MEMORY RUNWAY: ~{days_until_mem:.0f} days at current growth rate', BOLD + RED)}")
+        print(f"    {color('>>> ', RED)}{color(f'Action needed before: forest memory reaches {fmt_mb(ceiling - fixed_mem)} '
+              f'(currently {fmt_mb(forest_now)})', DIM)}")
+    elif days > 0 and forest_delta <= 0:
+        print()
+        print(f"    {color('Forest memory stable or shrinking over this period.', GREEN)}")
+        print(f"    No immediate memory pressure detected.")
+    elif days == 0:
+        print()
+        print(f"    {color('Snapshots are too close together for rate calculation.', YELLOW)}")
+        print(f"    Take snapshots hours or days apart for meaningful trends.")
+
+    # ── Growth summary ─────────────────────────────────────────────
+    sub_header("Growth Summary")
     kv("Time span", f"{days:.1f} days ({len(points)} snapshots)")
 
     metrics = [
-        ("Documents",     "docs",      "",    False),
-        ("Forest disk",   "disk_mb",   "MB",  True),
-        ("Forest memory", "forest_mb", "MB",  True),
-        ("RSS",           "rss_mb",    "MB",  True),
-        ("Fragments",     "fragments", "",    False),
+        ("Documents",     "docs",      False),
+        ("Forest memory", "forest_mb", True),
+        ("Forest disk",   "disk_mb",   True),
+        ("RSS",           "rss_mb",    True),
+        ("Fragments",     "fragments", False),
     ]
 
-    for label, key, unit, is_mb in metrics:
+    for label, key, is_mb in metrics:
         v_first = first[key]
         v_last  = last[key]
         delta   = v_last - v_first
@@ -1577,56 +1634,30 @@ def report_trend(database):
 
         kv(label, f"{first_s} → {last_s}  {color(delta_s, GREEN if delta >= 0 else RED)}{rate_s}")
 
-    # ── Runway projections based on observed growth ────────────────
+    # ── Other runway projections ───────────────────────────────────
     if days > 0:
-        sub_header("Runway Projections (based on observed growth rate)")
-
-        doc_delta    = last["docs"]      - first["docs"]
-        forest_delta = last["forest_mb"] - first["forest_mb"]
-        disk_delta   = last["disk_mb"]   - first["disk_mb"]
-
-        # Memory runway
-        sys_total   = last["sys_total"]
-        cache_mb    = last["cache_mb"]
-        base_mb     = last["base_mb"]
-        file_mb     = last["file_mb"]
-        forest_now  = last["forest_mb"]
-        fixed_mem   = cache_mb + base_mb + file_mb
-        ceiling     = sys_total * 0.80
-        headroom    = ceiling - fixed_mem - forest_now
-
-        if forest_delta > 0 and headroom > 0:
-            daily_forest = forest_delta / days
-            days_until_mem = headroom / daily_forest
-            kv("Forest memory headroom",   fmt_mb(headroom))
-            kv("Forest growth rate",        f"{fmt_mb(daily_forest)}/day")
-            kv("Days until memory ceiling", f"{color(f'{days_until_mem:.0f} days', BOLD)}")
-        elif forest_delta <= 0:
-            kv("Forest memory trend", color("stable or shrinking — no memory pressure", GREEN))
+        sub_header("Other Resource Runways")
 
         # Disk runway
-        db_stat = last  # use last snapshot's totals
-        disk_now = last["disk_mb"]
-        # Need device space from snapshot — pull from any snapshot that has it
-        device_space = 0
+        remaining_disk = 0
         for s in reversed(snaps):
-            ds = s.get("database_status", {}).get("device_space_mb", 0)
-            if ds:
-                device_space = float(ds)
+            rd = s.get("database_status", {}).get("least_remaining_mb", 0)
+            if rd:
+                remaining_disk = float(rd)
                 break
-        remaining_disk = s.get("database_status", {}).get("least_remaining_mb", 0)
-        remaining_disk = float(remaining_disk) if remaining_disk else 0
 
+        days_until_disk = None
         if disk_delta > 0 and remaining_disk > 0:
             daily_disk = disk_delta / days
             days_until_disk = remaining_disk / daily_disk
             kv("Disk free",                fmt_mb(remaining_disk))
             kv("Disk growth rate",          f"{fmt_mb(daily_disk)}/day")
-            kv("Days until disk full",      f"{color(f'{days_until_disk:.0f} days', BOLD)}")
+            kv("Days until disk full",      f"{days_until_disk:,.0f} days")
         elif disk_delta <= 0:
-            kv("Disk trend", color("stable or shrinking — no disk pressure", GREEN))
+            kv("Disk", color("stable or shrinking", GREEN))
 
         # Fragment runway
+        days_until_frag = None
         MAX_FRAGS = 96_000_000 * max(1, len(snaps[-1].get("forests", [{}])))
         frag_delta = last["fragments"] - first["fragments"]
         frag_remaining = MAX_FRAGS - last["fragments"]
@@ -1635,23 +1666,34 @@ def report_trend(database):
             days_until_frag = frag_remaining / daily_frags
             kv("Fragment headroom",         f"{frag_remaining:,}")
             kv("Fragment growth rate",      f"{daily_frags:,.0f}/day")
-            kv("Days until fragment limit", f"{color(f'{days_until_frag:.0f} days', BOLD)}")
+            kv("Days until fragment limit", f"{days_until_frag:,.0f} days")
 
-        # Determine binding constraint
-        runways = []
+        # ── Binding constraint summary ─────────────────────────────
+        sub_header("Binding Constraint")
+        days_until_mem = None
         if forest_delta > 0 and headroom > 0:
-            runways.append(("memory", days_until_mem))
-        if disk_delta > 0 and remaining_disk > 0:
-            runways.append(("disk", days_until_disk))
-        if frag_delta > 0 and frag_remaining > 0:
-            runways.append(("fragments", days_until_frag))
+            days_until_mem = headroom / (forest_delta / days)
+
+        runways = []
+        if days_until_mem is not None:
+            runways.append(("MEMORY", days_until_mem))
+        if days_until_disk is not None:
+            runways.append(("DISK", days_until_disk))
+        if days_until_frag is not None:
+            runways.append(("FRAGMENTS", days_until_frag))
 
         if runways:
-            binding = min(runways, key=lambda x: x[1])
-            print()
-            kv("Binding constraint",
-               f"{color(binding[0].upper(), BOLD + RED)} "
-               f"(~{binding[1]:.0f} days at current rate)")
+            runways.sort(key=lambda x: x[1])
+            for name, d in runways:
+                is_binding = (name == runways[0][0])
+                marker = color(">>>", RED) if is_binding else "   "
+                c = RED + BOLD if is_binding else DIM
+                label = f"{name:12} ~{d:,.0f} days"
+                if is_binding:
+                    label += "  <-- BINDING CONSTRAINT"
+                print(f"    {marker} {color(label, c)}")
+        else:
+            print(f"    {color('No growth detected — all resources stable.', GREEN)}")
 
 
 def report_compare(database, compare_idx):
