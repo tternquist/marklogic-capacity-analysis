@@ -1303,7 +1303,7 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
     # Memory-based capacity using the detailed component breakdown
     if host_data:
         def hsum(key):
-            return sum(float(h.get(key, 0) or 0) for h in host_data)
+            return sum(float(v) for h in host_data if (v := h.get(key)) is not None)
 
         total_sys        = hsum("memory-system-total-mb")
         free_sys         = hsum("memory-system-free-mb")
@@ -1345,8 +1345,15 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
 
         # MarkLogic's configured limit is ml_limit (group memory-size setting)
         # RSS should stay under min(ml_limit, system_ram * 0.80)
-        safe_cap = min(ml_limit if ml_limit else total_sys * 0.80,
-                       total_sys * 0.80)
+        # When system RAM is unavailable (containers, just-restarted), fall
+        # back to ml_limit as the ceiling.
+        if total_sys > 0:
+            ram_cap = total_sys * 0.80
+            safe_cap = min(ml_limit, ram_cap) if ml_limit else ram_cap
+        elif ml_limit > 0:
+            safe_cap = ml_limit  # container or just-restarted — use ML limit
+        else:
+            safe_cap = 0
         headroom = safe_cap - rss
         rss_pct  = (rss / safe_cap * 100) if safe_cap else 0
 
@@ -1498,8 +1505,8 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
                     f"consider forcing a merge to reclaim space"))
 
     if host_data:
-        total_sys = sum(h.get("memory-system-total-mb", 0) for h in host_data)
-        ml_rss = sum(h.get("memory-process-rss-mb", 0) for h in host_data)
+        total_sys = sum(float(v) for h in host_data if (v := h.get("memory-system-total-mb")) is not None)
+        ml_rss = sum(float(v) for h in host_data if (v := h.get("memory-process-rss-mb")) is not None)
         if total_sys > 0 and ml_rss / total_sys > 0.7:
             issues.append(("Memory pressure", f"ML process using {ml_rss/total_sys*100:.0f}% of system memory"))
 
@@ -1627,7 +1634,7 @@ def collect_snapshot(client, database):
     total_mem     = sum(f.get("memory-size-mb", 0) or 0 for f in snap["forests"])
 
     def hsum(key):
-        return sum(float(h.get(key, 0) or 0) for h in snap["hosts"])
+        return sum(float(v) for h in snap["hosts"] if (v := h.get(key)) is not None)
 
     snap["totals"] = {
         "documents":        total_docs,
@@ -2756,11 +2763,25 @@ _WEB_UI_HTML = """<!DOCTYPE html>
 body { background: #0d1117; color: #c9d1d9; font-family: 'SF Mono', 'Consolas', monospace; font-size: 14px; }
 .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
 h1 { color: #58a6ff; font-size: 20px; margin-bottom: 4px; }
-h2 { color: #8b949e; font-size: 14px; margin-bottom: 20px; font-weight: normal; }
 h3 { color: #58a6ff; font-size: 16px; margin: 24px 0 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
 
-.hero { display: flex; gap: 20px; margin-bottom: 24px; }
-.hero-card { flex: 1; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; text-align: center; }
+.header { display: flex; align-items: center; gap: 16px; margin-bottom: 4px; flex-wrap: wrap; }
+.header h1 { margin-bottom: 0; }
+.db-select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+  padding: 6px 10px; font-family: inherit; font-size: 13px; cursor: pointer; }
+.db-select:focus { border-color: #58a6ff; outline: none; }
+#subtitle { color: #8b949e; font-size: 14px; margin-bottom: 12px; }
+
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #21262d; margin-bottom: 20px; }
+.tab { padding: 10px 20px; cursor: pointer; color: #8b949e; border-bottom: 2px solid transparent;
+  font-family: inherit; font-size: 14px; background: none; border-top: none; border-left: none; border-right: none; }
+.tab:hover { color: #c9d1d9; }
+.tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+.hero { display: flex; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }
+.hero-card { flex: 1; min-width: 200px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; text-align: center; }
 .hero-card.warn { border-color: #d29922; }
 .hero-card.crit { border-color: #f85149; }
 .hero-value { font-size: 36px; font-weight: bold; color: #58a6ff; }
@@ -2791,70 +2812,175 @@ th { text-align: left; color: #58a6ff; border-bottom: 1px solid #30363d; padding
 td { padding: 6px 8px; border-bottom: 1px solid #21262d; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+.btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+  padding: 5px 12px; cursor: pointer; font-family: inherit; font-size: 12px; }
+.btn:hover { background: #30363d; border-color: #8b949e; }
+.btn-primary { background: #238636; border-color: #238636; color: #fff; }
+.btn-primary:hover { background: #2ea043; }
+.btn-danger { color: #f85149; }
+.btn-danger:hover { background: #da3633; color: #fff; border-color: #da3633; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.snap-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.chart-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.chart-card canvas { width: 100%; height: 220px; }
+.chart-title { color: #58a6ff; font-size: 13px; margin-bottom: 10px; }
+.chart-tooltip { position: fixed; background: #161b22; border: 1px solid #58a6ff; border-radius: 6px;
+  padding: 8px 12px; font-size: 12px; pointer-events: none; z-index: 100; display: none; color: #c9d1d9; }
+
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7);
+  z-index: 200; display: none; justify-content: center; align-items: center; }
+.modal-overlay.show { display: flex; }
+.modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 800px;
+  width: 90%; max-height: 80vh; display: flex; flex-direction: column; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px;
+  border-bottom: 1px solid #21262d; }
+.modal-header h3 { margin: 0; border: none; padding: 0; }
+.modal-close { background: none; border: none; color: #8b949e; font-size: 20px; cursor: pointer; padding: 4px 8px; }
+.modal-close:hover { color: #c9d1d9; }
+.modal-body { padding: 16px; overflow-y: auto; flex: 1; }
+.modal-body pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.5; }
+
 .footer { margin-top: 24px; color: #484f58; font-size: 12px; text-align: center; }
 .loading { color: #8b949e; text-align: center; padding: 40px; }
+
+@media (max-width: 768px) {
+  .chart-grid { grid-template-columns: 1fr; }
+  .hero { flex-direction: column; }
+}
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>MLCA — MarkLogic Capacity Analysis</h1>
-  <h2 id="subtitle">Loading...</h2>
+  <div class="header">
+    <h1>MLCA</h1>
+    <select id="dbSelect" class="db-select" title="Select database"></select>
+  </div>
+  <div id="subtitle">Loading...</div>
 
-  <div class="hero" id="hero"></div>
+  <div class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="trends">Trends</button>
+    <button class="tab" data-tab="snapshots">Snapshots</button>
+  </div>
 
-  <div class="grid" id="grid"></div>
+  <div id="tab-dashboard" class="tab-content active">
+    <div class="hero" id="hero"></div>
+    <div class="grid" id="grid"></div>
+    <h3>Index Memory Usage</h3>
+    <div class="card" id="indexes"><div class="loading">Loading...</div></div>
+  </div>
 
-  <h3>Index Memory Usage</h3>
-  <div class="card" id="indexes"><div class="loading">Loading...</div></div>
+  <div id="tab-trends" class="tab-content">
+    <div class="chart-grid" id="charts">
+      <div class="chart-card"><div class="chart-title">Documents</div><canvas id="chart-docs"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Forest Memory</div><canvas id="chart-forest"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Disk Usage</div><canvas id="chart-disk"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Memory Ceiling %</div><canvas id="chart-ceiling"></canvas></div>
+    </div>
+    <div id="trend-empty" class="loading" style="display:none">Not enough snapshots for trend charts. Take at least 2 snapshots.</div>
+  </div>
+
+  <div id="tab-snapshots" class="tab-content">
+    <div class="snap-toolbar">
+      <h3 style="margin:0;border:none;padding:0">Saved Snapshots</h3>
+      <button class="btn btn-primary" id="takeSnapshotBtn" onclick="takeSnapshot()">Take Snapshot</button>
+    </div>
+    <div class="card" id="snap-list"><div class="loading">Loading...</div></div>
+  </div>
 
   <div class="footer">MLCA &mdash; refreshes every 30s</div>
 </div>
 
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Snapshot Detail</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body"><pre id="modal-body"></pre></div>
+  </div>
+</div>
+
+<div class="chart-tooltip" id="tooltip"></div>
+
 <script>
+var selectedDb = null;
+var activeTab = 'dashboard';
+
 function fmt(mb) {
   if (mb == null) return 'N/A';
   mb = Number(mb);
   if (mb >= 1024) return (mb/1024).toFixed(2) + ' GB';
   return mb.toFixed(1) + ' MB';
 }
-function pct(a, b) { return b > 0 ? (a/b*100).toFixed(1) : '0'; }
+function fmtNum(n) { return (n||0).toLocaleString(); }
 function barClass(p) { return p >= 90 ? 'red' : p >= 70 ? 'yellow' : 'green'; }
-function heroClass(days) { return days < 30 ? 'crit' : days < 90 ? 'warn' : ''; }
-
-function renderBar(pctVal) {
-  return '<div class="bar-container"><div class="bar-fill ' + barClass(pctVal) +
-         '" style="width:' + Math.min(100, pctVal) + '%"></div></div>';
+function renderBar(v) {
+  return '<div class="bar-container"><div class="bar-fill ' + barClass(v) +
+         '" style="width:' + Math.min(100, v) + '%"></div></div>';
 }
-
 function metric(key, val, cls) {
   return '<div class="metric"><span class="metric-key">' + key +
          '</span><span class="metric-val' + (cls ? ' '+cls : '') + '">' + val + '</span></div>';
 }
+function dbParam() { return selectedDb ? '?database=' + encodeURIComponent(selectedDb) : ''; }
 
-async function refresh() {
+// Tabs
+document.querySelectorAll('.tab').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+    document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+    tab.classList.add('active');
+    activeTab = tab.dataset.tab;
+    document.getElementById('tab-' + activeTab).classList.add('active');
+    refreshActiveTab();
+  });
+});
+
+// Database selector
+async function loadDatabases() {
   try {
-    const snap = await (await fetch('/api/snapshot')).json();
-    const t = snap.totals || {};
-    const db = snap.database || '?';
-    const ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
+    var dbs = await (await fetch('/api/databases')).json();
+    var sel = document.getElementById('dbSelect');
+    sel.innerHTML = '';
+    dbs.forEach(function(db) {
+      var opt = document.createElement('option');
+      opt.value = db; opt.textContent = db;
+      if (db === selectedDb) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    if (!selectedDb && dbs.length > 0) selectedDb = dbs[0];
+  } catch(e) {}
+}
+document.getElementById('dbSelect').addEventListener('change', function() {
+  selectedDb = this.value;
+  refreshActiveTab();
+});
 
-    document.getElementById('subtitle').textContent = db + ' \u2014 ' + ts;
+// Dashboard
+async function refreshDashboard() {
+  try {
+    var snap = await (await fetch('/api/snapshot' + dbParam())).json();
+    if (snap.error) { document.getElementById('subtitle').textContent = snap.error; return; }
+    var t = snap.totals || {};
+    var db = snap.database || '?';
+    var ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
+    document.getElementById('subtitle').textContent = db + ' \\u2014 ' + ts;
 
-    // Compute memory runway
-    const sysTot = t.system_total_mb || 0;
-    const cache = t.host_cache_mb || 0;
-    const base = t.host_base_mb || 0;
-    const file = t.host_file_mb || 0;
-    const forest = t.host_forest_mb || 0;
-    const fixed = cache + base + file;
-    const ceiling = sysTot * 0.8;
-    const headroom = ceiling - fixed - forest;
-    const memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
+    var sysTot = t.system_total_mb || 0;
+    var cache = t.host_cache_mb || 0, base = t.host_base_mb || 0;
+    var file = t.host_file_mb || 0, forest = t.host_forest_mb || 0;
+    var fixed = cache + base + file;
+    var ceiling = sysTot * 0.8;
+    var headroom = ceiling - fixed - forest;
+    var memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
 
-    // Hero cards
-    let heroHTML = '';
+    var heroHTML = '';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
-                (t.documents||0).toLocaleString() + '</div><div class="hero-label">Documents</div></div>';
+                fmtNum(t.documents) + '</div><div class="hero-label">Documents</div></div>';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
                 fmt(forest) + '</div><div class="hero-label">Forest Memory</div></div>';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
@@ -2864,10 +2990,7 @@ async function refresh() {
                 renderBar(memPct) + '</div>';
     document.getElementById('hero').innerHTML = heroHTML;
 
-    // Grid cards
-    let grid = '';
-
-    // Memory breakdown
+    var grid = '';
     grid += '<div class="card"><div class="card-title">Memory Breakdown</div>' +
       metric('Cache (list+tree)', fmt(cache)) +
       metric('Forest stands', fmt(forest)) +
@@ -2878,12 +3001,11 @@ async function refresh() {
       metric('Headroom', fmt(headroom), headroom < 1024 ? 'warn' : 'good') +
     '</div>';
 
-    // Host
-    const hosts = snap.hosts || [];
+    var hosts = snap.hosts || [];
     if (hosts.length > 0) {
-      const h = hosts[0];
-      const rss = h['memory-process-rss-mb'] || 0;
-      const swap = h['memory-process-swap-mb'] || 0;
+      var h = hosts[0];
+      var rss = h['memory-process-rss-mb'] || 0;
+      var swap = h['memory-process-swap-mb'] || 0;
       grid += '<div class="card"><div class="card-title">Host: ' + (h.hostname||'?') + '</div>' +
         metric('System RAM', fmt(h['memory-system-total-mb'])) +
         metric('ML RSS', fmt(rss)) +
@@ -2893,12 +3015,11 @@ async function refresh() {
       '</div>';
     }
 
-    // Disk
-    const dbStat = snap.database_status || {};
-    const diskUsed = t.forest_disk_mb || 0;
-    const diskRemaining = Number(dbStat.least_remaining_mb || 0);
-    const diskTotal = diskUsed + diskRemaining;
-    const diskPct = diskTotal > 0 ? (diskUsed / diskTotal * 100) : 0;
+    var dbStat = snap.database_status || {};
+    var diskUsed = t.forest_disk_mb || 0;
+    var diskRemaining = Number(dbStat.least_remaining_mb || 0);
+    var diskTotal = diskUsed + diskRemaining;
+    var diskPct = diskTotal > 0 ? (diskUsed / diskTotal * 100) : 0;
     grid += '<div class="card"><div class="card-title">Disk</div>' +
       metric('Data on disk', fmt(diskUsed)) +
       metric('Remaining', fmt(diskRemaining)) +
@@ -2906,43 +3027,39 @@ async function refresh() {
       (t.documents > 0 ? metric('Bytes/doc', Math.round(diskUsed*1048576/t.documents).toLocaleString()) : '') +
     '</div>';
 
-    // Fragments
-    const active = t.active_fragments || 0;
-    const deleted = t.deleted_fragments || 0;
-    const fragTotal = active + deleted;
-    const fragPct = fragTotal > 0 ? (deleted/fragTotal*100) : 0;
+    var active = t.active_fragments || 0, deleted = t.deleted_fragments || 0;
+    var fragTotal = active + deleted;
+    var fragPct = fragTotal > 0 ? (deleted/fragTotal*100) : 0;
     grid += '<div class="card"><div class="card-title">Fragments</div>' +
-      metric('Active', active.toLocaleString()) +
-      metric('Deleted', deleted.toLocaleString(), deleted > 0 ? 'warn' : '') +
+      metric('Active', fmtNum(active)) +
+      metric('Deleted', fmtNum(deleted), deleted > 0 ? 'warn' : '') +
       metric('Fragmentation', fragPct.toFixed(1) + '%', fragPct > 25 ? 'crit' : fragPct > 10 ? 'warn' : 'good') +
       (fragPct >= 25 ? renderBar(fragPct) : '') +
     '</div>';
-
     document.getElementById('grid').innerHTML = grid;
 
     // Index table
-    const im = snap.index_memory || {};
-    const indexes = im.indexes || [];
+    var im = snap.index_memory || {};
+    var indexes = im.indexes || [];
     if (indexes.length > 0) {
-      indexes.sort((a,b) => (b.totalMemoryBytes||0) - (a.totalMemoryBytes||0));
-      let tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
-      indexes.forEach(i => {
-        const name = i.localname || i.pathExpression || i.indexType || '?';
-        const mem = i.totalMemoryBytes || 0;
-        const disk = i.totalOnDiskBytes || 0;
-        const memStr = mem > 0 ? fmt(mem/1048576) : '<span style="color:#484f58">not cached</span>';
-        const diskStr = disk > 0 ? fmt(disk/1048576) : '<span style="color:#484f58">not cached</span>';
+      indexes.sort(function(a,b) { return (b.totalMemoryBytes||0) - (a.totalMemoryBytes||0); });
+      var tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
+      indexes.forEach(function(i) {
+        var name = i.localname || i.pathExpression || i.indexType || '?';
+        var mem = i.totalMemoryBytes || 0;
+        var disk = i.totalOnDiskBytes || 0;
+        var memStr = mem > 0 ? fmt(mem/1048576) : '<span style="color:#484f58">not cached</span>';
+        var diskStr = disk > 0 ? fmt(disk/1048576) : '<span style="color:#484f58">not cached</span>';
         tbl += '<tr><td>' + name + '</td><td>' + (i.scalarType||i.indexType||'') +
                '</td><td class="num">' + memStr +
                '</td><td class="num">' + diskStr + '</td></tr>';
       });
       tbl += '</table>';
 
-      // Show stand-level range index total (more accurate than per-index cache data)
-      const sums = (im.standSummaries || []);
+      var sums = (im.standSummaries || []);
       if (sums.length > 0) {
-        let totalRange = 0;
-        sums.forEach(s => { totalRange += (s.summary||{}).rangeIndexesBytes || 0; });
+        var totalRange = 0;
+        sums.forEach(function(s) { totalRange += (s.summary||{}).rangeIndexesBytes || 0; });
         if (totalRange > 0) {
           tbl += '<div style="margin-top:12px;padding:8px;background:#21262d;border-radius:4px">' +
             '<span class="metric-key">Total range index memory (stand-level): </span>' +
@@ -2957,14 +3074,230 @@ async function refresh() {
     } else {
       document.getElementById('indexes').innerHTML = '<div class="loading">No index memory data available</div>';
     }
-
   } catch(e) {
     document.getElementById('subtitle').textContent = 'Error: ' + e.message;
   }
 }
 
-refresh();
-setInterval(refresh, 30000);
+// Snapshots tab
+async function refreshSnapshots() {
+  try {
+    var snaps = await (await fetch('/api/snapshots' + dbParam())).json();
+    if (snaps.length === 0) {
+      document.getElementById('snap-list').innerHTML = '<div class="loading">No snapshots found</div>';
+      return;
+    }
+    snaps.reverse();
+    var tbl = '<table><tr><th>#</th><th>Timestamp</th><th>Database</th>' +
+              '<th style="text-align:right">Documents</th><th style="text-align:right">Forest Disk</th>' +
+              '<th style="text-align:right">RSS</th><th>Actions</th></tr>';
+    snaps.forEach(function(s, i) {
+      var ts = (s.timestamp||'').substring(0,19).replace('T',' ');
+      var file = s.file || '';
+      tbl += '<tr><td>' + (snaps.length - i) + '</td><td>' + ts + '</td><td>' + (s.database||'') + '</td>' +
+             '<td class="num">' + fmtNum(s.documents) + '</td>' +
+             '<td class="num">' + fmt(s.forest_disk_mb) + '</td>' +
+             '<td class="num">' + fmt(s.host_rss_mb) + '</td>' +
+             '<td><button class="btn" onclick="viewSnapshot(\\'' + file + '\\')">View</button> ' +
+             '<button class="btn btn-danger" onclick="deleteSnapshot(\\'' + file + '\\')">Delete</button></td></tr>';
+    });
+    tbl += '</table>';
+    document.getElementById('snap-list').innerHTML = tbl;
+  } catch(e) {
+    document.getElementById('snap-list').innerHTML = '<div class="loading">Error: ' + e.message + '</div>';
+  }
+}
+
+async function viewSnapshot(filename) {
+  try {
+    var data = await (await fetch('/api/snapshot/' + encodeURIComponent(filename))).json();
+    document.getElementById('modal-title').textContent = filename;
+    document.getElementById('modal-body').textContent = JSON.stringify(data, null, 2);
+    document.getElementById('modal').classList.add('show');
+  } catch(e) { alert('Failed to load snapshot: ' + e.message); }
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('show'); }
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeModal(); });
+document.getElementById('modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+async function deleteSnapshot(filename) {
+  if (!confirm('Delete snapshot ' + filename + '?')) return;
+  try {
+    var resp = await fetch('/api/snapshots/' + encodeURIComponent(filename), { method: 'DELETE' });
+    if (resp.ok) refreshSnapshots();
+    else alert('Delete failed: ' + (await resp.json()).error);
+  } catch(e) { alert('Delete error: ' + e.message); }
+}
+
+async function takeSnapshot() {
+  var btn = document.getElementById('takeSnapshotBtn');
+  btn.disabled = true; btn.textContent = 'Collecting...';
+  try {
+    var body = selectedDb ? JSON.stringify({database: selectedDb}) : '{}';
+    var resp = await fetch('/api/snapshot', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: body
+    });
+    var result = await resp.json();
+    if (resp.ok) {
+      refreshSnapshots();
+      loadDatabases();
+    } else {
+      alert('Snapshot failed: ' + (result.error || 'Unknown error'));
+    }
+  } catch(e) { alert('Snapshot error: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Take Snapshot';
+}
+
+// Charts
+function drawChart(canvasId, points, yKey, color, yFmt) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  var rect = canvas.parentElement.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = (rect.width - 32) * dpr;
+  canvas.height = 220 * dpr;
+  canvas.style.width = (rect.width - 32) + 'px';
+  canvas.style.height = '220px';
+  var ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  var W = rect.width - 32, H = 220;
+  var pad = {top: 10, right: 16, bottom: 35, left: 65};
+  var plotW = W - pad.left - pad.right, plotH = H - pad.top - pad.bottom;
+
+  if (points.length < 2) return;
+
+  var vals = points.map(function(p) { return p[yKey] || 0; });
+  var times = points.map(function(p) { return new Date(p.timestamp).getTime(); });
+  var yMin = Math.min.apply(null, vals), yMax = Math.max.apply(null, vals);
+  if (yMin === yMax) { yMin = yMin * 0.9; yMax = yMax * 1.1 || 1; }
+  var yRange = yMax - yMin;
+  var tMin = Math.min.apply(null, times), tMax = Math.max.apply(null, times);
+  var tRange = tMax - tMin || 1;
+
+  function xPos(t) { return pad.left + (t - tMin) / tRange * plotW; }
+  function yPos(v) { return pad.top + plotH - (v - yMin) / yRange * plotH; }
+
+  ctx.fillStyle = '#161b22';
+  ctx.fillRect(0, 0, W, H);
+
+  // Gridlines and Y labels
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  var ySteps = 5;
+  for (var i = 0; i <= ySteps; i++) {
+    var yy = pad.top + plotH * i / ySteps;
+    ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(W - pad.right, yy); ctx.stroke();
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
+    var yVal = yMax - yRange * i / ySteps;
+    ctx.fillText(yFmt ? yFmt(yVal) : yVal.toFixed(0), pad.left - 6, yy + 4);
+  }
+
+  // X labels
+  ctx.textAlign = 'center'; ctx.fillStyle = '#8b949e';
+  var xSteps = Math.min(points.length - 1, 6);
+  for (var i = 0; i <= xSteps; i++) {
+    var idx = Math.round(i * (points.length - 1) / xSteps);
+    var d = new Date(points[idx].timestamp);
+    var label = (d.getMonth()+1) + '/' + d.getDate() + ' ' +
+      String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    ctx.fillText(label, xPos(times[idx]), H - 5);
+  }
+
+  // Line
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var i = 0; i < points.length; i++) {
+    var x = xPos(times[i]), y = yPos(vals[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Dots
+  ctx.fillStyle = color;
+  for (var i = 0; i < points.length; i++) {
+    ctx.beginPath();
+    ctx.arc(xPos(times[i]), yPos(vals[i]), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Area fill
+  ctx.globalAlpha = 0.1; ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(xPos(times[0]), yPos(vals[0]));
+  for (var i = 1; i < points.length; i++) ctx.lineTo(xPos(times[i]), yPos(vals[i]));
+  ctx.lineTo(xPos(times[points.length-1]), pad.top + plotH);
+  ctx.lineTo(xPos(times[0]), pad.top + plotH);
+  ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1.0;
+
+  canvas._chartData = { points: points, times: times, vals: vals, yKey: yKey, yFmt: yFmt,
+    xPos: xPos, yPos: yPos, pad: pad, W: W, H: H };
+}
+
+// Tooltip
+document.addEventListener('mousemove', function(e) {
+  var tooltip = document.getElementById('tooltip');
+  var canvas = e.target;
+  if (canvas.tagName !== 'CANVAS' || !canvas._chartData) { tooltip.style.display = 'none'; return; }
+  var cd = canvas._chartData;
+  var rect = canvas.getBoundingClientRect();
+  var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if (mx < cd.pad.left || mx > cd.W - cd.pad.right) { tooltip.style.display = 'none'; return; }
+
+  var closest = -1, closestDist = Infinity;
+  for (var i = 0; i < cd.times.length; i++) {
+    var dx = Math.abs(cd.xPos(cd.times[i]) - mx);
+    if (dx < closestDist) { closestDist = dx; closest = i; }
+  }
+  if (closest < 0 || closestDist > 30) { tooltip.style.display = 'none'; return; }
+  var p = cd.points[closest];
+  var d = new Date(p.timestamp);
+  var dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' +
+    String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' +
+    String(d.getMinutes()).padStart(2,'0');
+  var valStr = cd.yFmt ? cd.yFmt(cd.vals[closest]) : fmtNum(cd.vals[closest]);
+  tooltip.innerHTML = '<div>' + dateStr + '</div><div style="color:#58a6ff;font-weight:bold">' + valStr + '</div>';
+  tooltip.style.display = 'block';
+  tooltip.style.left = (e.clientX + 12) + 'px';
+  tooltip.style.top = (e.clientY - 10) + 'px';
+});
+
+async function refreshTrends() {
+  try {
+    var points = await (await fetch('/api/trend' + dbParam())).json();
+    var empty = document.getElementById('trend-empty');
+    var charts = document.getElementById('charts');
+    if (points.length < 2) {
+      empty.style.display = 'block'; charts.style.display = 'none'; return;
+    }
+    empty.style.display = 'none'; charts.style.display = 'grid';
+
+    points.forEach(function(p) {
+      var sysTot = p.system_total_mb || 0;
+      var ceiling = sysTot * 0.8;
+      var fixed = (p.host_cache_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
+      p.ceiling_pct = ceiling > 0 ? ((fixed + (p.host_forest_mb||0)) / ceiling * 100) : 0;
+    });
+
+    drawChart('chart-docs', points, 'documents', '#58a6ff', fmtNum);
+    drawChart('chart-forest', points, 'host_forest_mb', '#3fb950', fmt);
+    drawChart('chart-disk', points, 'forest_disk_mb', '#d29922', fmt);
+    drawChart('chart-ceiling', points, 'ceiling_pct', '#f85149', function(v) { return v.toFixed(1) + '%'; });
+  } catch(e) {}
+}
+
+// Refresh
+function refreshActiveTab() {
+  if (activeTab === 'dashboard') refreshDashboard();
+  else if (activeTab === 'trends') refreshTrends();
+  else if (activeTab === 'snapshots') refreshSnapshots();
+}
+
+loadDatabases().then(function() { refreshActiveTab(); });
+setInterval(refreshActiveTab, 30000);
+window.addEventListener('resize', function() { if (activeTab === 'trends') refreshTrends(); });
 </script>
 </body>
 </html>
