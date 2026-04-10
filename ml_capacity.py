@@ -1348,9 +1348,15 @@ def collect_snapshot(client, database):
         "host_rss_mb":      hsum("memory-process-rss-mb"),
         "host_base_mb":     hsum("host-size-mb"),
         "host_file_mb":     hsum("memory-file-size-mb"),
+        "ml_limit_mb":      hsum("memory-size-mb"),
         "system_total_mb":  hsum("memory-system-total-mb"),
         "system_free_mb":   hsum("memory-system-free-mb"),
     }
+
+    # In containers, system_total_mb may be 0 (cgroup doesn't expose it).
+    # Fall back to the ML configured limit (memory-size) as the ceiling.
+    if snap["totals"]["system_total_mb"] == 0 and snap["totals"]["ml_limit_mb"] > 0:
+        snap["totals"]["system_total_mb"] = snap["totals"]["ml_limit_mb"]
 
     return snap
 
@@ -1469,8 +1475,15 @@ def _values_match(a, b, field_name=""):
     Only fields in _FUZZY_MB_FIELDS get tolerance (0.5% or 2 MB).
     All other fields (counts, strings, versions) use exact equality
     so that e.g. an index count changing from 3 to 5 is always caught.
+
+    None/0 values are treated as "unknown" and always match — this
+    handles container environments where some OS metrics aren't available
+    in early snapshots but get populated later via fallback.
     """
     if a == b:
+        return True
+    # Treat None or 0 as "unknown" — don't flag drift for missing data
+    if a is None or b is None or a == 0 or b == 0:
         return True
     if field_name in _FUZZY_MB_FIELDS and isinstance(a, (int, float)) and isinstance(b, (int, float)):
         abs_tol = max(2, abs(a) * 0.005)  # 0.5% or 2 MB, whichever is larger

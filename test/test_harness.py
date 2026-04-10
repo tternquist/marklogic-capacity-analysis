@@ -245,7 +245,7 @@ def main():
     parser.add_argument("--user",       default="admin")
     parser.add_argument("--password",   default="admin")
     parser.add_argument("--database",   default="Documents")
-    parser.add_argument("--auth-type",  default="basic")
+    parser.add_argument("--auth-type",  default="digest")
     parser.add_argument("--phases",     type=int, default=6,
                         help="Number of loading phases (default: 6)")
     parser.add_argument("--phase-size", type=int, default=100000,
