@@ -2140,8 +2140,8 @@ def report_trend(database):
             kv("Est. docs until ceiling", f"{color(f'{docs_until_ceil:,}', BOLD)}")
         print()
         print(f"    {color('>>> ', RED)}{color(f'MEMORY RUNWAY: ~{days_until_mem:.0f} days at current growth rate', BOLD + RED)}")
-        print(f"    {color('>>> ', RED)}{color(f'Action needed before: forest memory reaches {fmt_mb(ceiling - fixed_mem)} '
-              f'(currently {fmt_mb(forest_now)})', DIM)}")
+        action_msg = f'Action needed before: forest memory reaches {fmt_mb(ceiling - fixed_mem)} (currently {fmt_mb(forest_now)})'
+        print(f"    {color('>>> ', RED)}{color(action_msg, DIM)}")
     elif days > 0 and forest_delta <= 0:
         print()
         print(f"    {color('Forest memory stable or shrinking over this period.', GREEN)}")
