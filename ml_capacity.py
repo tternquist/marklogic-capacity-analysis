@@ -1852,6 +1852,53 @@ def load_snapshots(database=None):
     return snaps
 
 
+def import_snapshots(file_paths):
+    """Import snapshot JSON files from disconnected environments.
+
+    Validates the snapshot structure, then saves each file into the
+    .ml-capacity/ directory using the standard naming convention.
+    Returns the number of successfully imported snapshots.
+    """
+    REQUIRED_KEYS = {"version", "timestamp", "database", "hosts", "forests", "totals"}
+    imported = 0
+
+    for fpath in file_paths:
+        p = Path(fpath)
+        if not p.exists():
+            print(f"    {color('SKIP', YELLOW)}: file not found: {fpath}")
+            continue
+        try:
+            with open(p) as f:
+                snap = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    {color('SKIP', YELLOW)}: invalid JSON in {p.name}: {e}")
+            continue
+
+        missing = REQUIRED_KEYS - set(snap.keys())
+        if missing:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} missing required keys: {', '.join(sorted(missing))}")
+            continue
+
+        # Ensure version compatibility
+        if snap.get("version", 0) != 1:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} has unsupported version {snap.get('version')}")
+            continue
+
+        # Validate database name
+        db = snap.get("database", "")
+        try:
+            validate_database_name(db)
+        except ValueError:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} has invalid database name '{db}'")
+            continue
+
+        saved_path = save_snapshot(snap)
+        print(f"    {color('OK', GREEN)}: {p.name} → {saved_path.name}")
+        imported += 1
+
+    return imported
+
+
 def list_snapshots(database=None):
     """Print a table of saved snapshots."""
     snaps = load_snapshots(database)
@@ -3576,7 +3623,7 @@ async function refreshSnapshots() {
               '<th style="text-align:right">RSS</th><th>Actions</th></tr>';
     snaps.forEach(function(s, i) {
       var ts = (s.timestamp||'').substring(0,19).replace('T',' ');
-      var file = s.file || '';
+      var file = (s.file || '').replace(/[^A-Za-z0-9_.\\-]/g, '');
       tbl += '<tr><td>' + (snaps.length - i) + '</td><td>' + ts + '</td><td>' + (s.database||'') + '</td>' +
              '<td class="num">' + fmtNum(s.documents) + '</td>' +
              '<td class="num">' + fmt(s.forest_disk_mb) + '</td>' +
@@ -3836,6 +3883,10 @@ def main():
     parser.add_argument("--api-token", default=None,
                         help="Bearer token required for service API access (env: MLCA_API_TOKEN)")
 
+    # Import snapshots from disconnected environments
+    parser.add_argument("--import-snapshot", nargs="+", metavar="FILE",
+                        help="Import snapshot JSON file(s) from a disconnected environment")
+
     args = parser.parse_args()
 
     # ── Configure logging ───────────────────────────────────────────
@@ -3857,6 +3908,15 @@ def main():
         header(f"SAVED SNAPSHOTS: {args.database}")
         list_snapshots(args.database)
         sys.exit(0)
+
+    # ── Import snapshots from disconnected environments ─────────────
+    if args.import_snapshot:
+        imported = import_snapshots(args.import_snapshot)
+        if imported:
+            print(f"\n    {color('Import complete:', GREEN)} {imported} snapshot(s) saved to {SNAPSHOT_DIR}/")
+            header(f"SAVED SNAPSHOTS: {args.database}")
+            list_snapshots(args.database)
+        sys.exit(0 if imported else 1)
 
     if not args.password:
         args.password = getpass.getpass(f"Password for {args.user}@{args.host}: ")

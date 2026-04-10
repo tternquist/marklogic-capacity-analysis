@@ -610,6 +610,62 @@ Snapshots capture all metrics in a single JSON file for later analysis.
 | `--compare N` | Diff the most recent snapshot vs snapshot #N |
 | `--index-impact` | Show index memory impact between 2 most recent snapshots |
 | `--project-docs N` | Project index costs at N documents (use with `--index-impact`) |
+| `--import-snapshot FILE...` | Import snapshot JSON files from disconnected environments |
+
+### Disconnected Environments
+
+For MarkLogic clusters that are not network-reachable from the machine running
+MLCA (air-gapped, VPN-restricted, different data centers), you can collect
+snapshots directly on the cluster and import them later.
+
+**Step 1: Collect a snapshot on the remote cluster**
+
+Copy `scripts/collect-snapshot.sjs` to the target environment and run it via
+Query Console or curl:
+
+```bash
+# Via Query Console:
+#   1. Open Query Console on the target cluster
+#   2. Paste the contents of scripts/collect-snapshot.sjs
+#   3. Edit the DATABASE variable at the top of the script
+#   4. Run it and copy the JSON output to a file
+
+# Via curl:
+curl -s --anyauth -u admin:password \
+  -X POST http://remote-host:8000/v1/eval \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "javascript=$(cat scripts/collect-snapshot.sjs)" \
+  | python3 -c "
+import sys, json
+for part in sys.stdin.read().split('--'):
+    if 'application/json' in part:
+        body = part.split('\r\n\r\n', 1)[1].strip()
+        if body:
+            print(json.dumps(json.loads(body), indent=2))
+" > snapshot_remote_$(date +%Y%m%d).json
+```
+
+The script collects the same data as a live MLCA run: host memory, forest
+counts, database properties, index configuration, and per-index memory detail
+(ML 11+).
+
+**Required privileges:** `xdmp:host-status`, `xdmp:forest-status`,
+`xdmp:forest-counts`, `xdmp:hosts`, `xdmp:database-forests`. For index memory
+detail: `xdmp:database-describe-indexes` (ML 11+).
+
+**Step 2: Import the snapshot into MLCA**
+
+```bash
+# Import one or more snapshot files
+python3 ml_capacity.py --import-snapshot snapshot_remote_*.json
+
+# Then use all the usual analysis commands
+python3 ml_capacity.py --database Documents --trend
+python3 ml_capacity.py --database Documents --compare 0
+```
+
+The import validates the JSON structure and saves each file into `.ml-capacity/`
+using the standard naming convention. No server connection is needed.
 
 ### Configuration Stability Check
 
@@ -983,6 +1039,8 @@ ml-capacity/
   ml_capacity.py                 # CLI + service mode (--serve)
   ml_capacity_test.py            # Scaling validation test
   ml_capacity_stress.py          # One-time stress test
+  scripts/
+    collect-snapshot.sjs         # SJS script for disconnected snapshot collection
   Dockerfile                     # MLCA service container
   docker-compose.mlca-only.yml   # MLCA only (existing Prometheus + Grafana)
   docker-compose.yml             # MLCA + Prometheus + Grafana (existing ML)
