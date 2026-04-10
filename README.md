@@ -117,13 +117,26 @@ Uses `xdmp.databaseDescribeIndexes()` for index definitions and
 
 ### 7. Capacity Estimate
 
-The projection model:
+The projection model uses **disk size as the primary estimator** — stress testing
+confirmed that disk grows linearly and predictably with document count, while
+forest memory fluctuates with merge activity and cached stand pages.
 
-1. **Forest memory** is the only component that grows with document count
-2. Fixed components (cache + base + file cache) are subtracted from the 80% RAM ceiling
-3. The remaining headroom is divided by per-document forest memory to estimate capacity
-4. Fragment limits (96M per forest) and stand limits (64 per forest) are checked separately
-5. Scaling recommendations flag issues: high fragmentation, stand pressure, memory pressure
+1. **Disk-based projection (primary)**: Divides current disk size by document count
+   to get bytes/doc, then estimates how many more documents fit in remaining disk space.
+   Validated to within 4% accuracy across 500K+ document loads.
+2. **Forest memory indicator (secondary)**: Shown for context but not used for the
+   headline projection. `memory-forest-size` includes cached on-disk stand pages
+   that get compressed during merges, so it does not scale linearly with doc count.
+   For memory-based projections, use `--trend` which measures actual growth rates
+   over time.
+3. Fragment limits (96M per forest) and stand limits (64 per forest) are checked separately
+4. Scaling recommendations flag issues: high fragmentation, stand pressure, memory pressure
+
+**Why disk, not memory?** Stress testing loaded 1.48M documents (10x the initial
+count) and found that forest memory grew only ~530 MB while disk grew ~2 GB. Merges
+during loading actually *reduced* forest memory even as document count increased.
+The disk bytes/doc (1,438 observed) matched the scaling test regression (1,378) to
+within 4%, while the forest memory bytes/doc was off by 89%.
 
 ## Snapshots and Trending
 
@@ -310,16 +323,44 @@ System RAM
 ```
 
 **Fixed components** (cache + base + file cache) are set by configuration and
-do not grow with document count. **Forest memory** is the only component that
-scales with data volume. MLCA subtracts fixed components from the memory ceiling
-to determine the true headroom available for forest growth.
+do not grow with document count. **Forest memory** grows with data but not
+linearly — merges compress stand data, and cached pages fluctuate with query
+activity. This is why MLCA uses disk-based projections for point-in-time
+estimates and `--trend` (actual growth rate) for memory projections.
+
+**Important:** Memory is the binding constraint in the vast majority of
+MarkLogic deployments — disk is easy to add, memory is not. While disk-based
+projection is the most reliable *point-in-time* metric, the `--trend` analysis
+using actual observed `memory-forest-size` growth over time is the best way
+to project when memory-based scaling will be needed. Take snapshots regularly
+and use `--trend` for memory runway planning.
+
+## Stress Test
+
+`ml_capacity_stress.py` is a one-time test that loads documents toward the
+projected memory ceiling to validate capacity projections:
+
+```bash
+# Default: load to 75% of projected ceiling in 100K-doc waves
+python3 ml_capacity_stress.py --host ml.example.com --user admin --password secret \
+    --auth-type basic
+
+# Adjust target percentage or wave size
+python3 ml_capacity_stress.py --host ml.example.com --user admin --password secret \
+    --auth-type basic --target-pct 50 --wave-size 50000
+```
+
+The test includes safety stops for swap detection, memory threshold breach, and
+low system free memory. It takes before/after snapshots and reports actual vs
+projected per-document costs.
 
 ## File Structure
 
 ```
 ml-capacity/
   ml_capacity.py        # Main capacity analyzer CLI
-  ml_capacity_test.py   # Scaling validation test
+  ml_capacity_test.py   # Scaling validation test (linear regression)
+  ml_capacity_stress.py # One-time stress test (load toward ceiling)
   .ml-capacity/         # Snapshot storage (gitignored)
     20260410T120000_Documents.json
     20260410T130000_Documents.json
