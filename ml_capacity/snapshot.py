@@ -206,6 +206,40 @@ def load_snapshots(database=None):
     return snaps
 
 
+def import_snapshot_data(snap):
+    """Import a single snapshot dict (e.g. from an API request).
+
+    Validates structure, saves to .ml-capacity/, and returns a result dict.
+    On success: {"status": "ok", "filename": "...", "database": "...", "documents": N}
+    On error:   {"error": "reason"}
+    """
+    from ml_capacity.validation import validate_database_name
+
+    REQUIRED_KEYS = {"version", "timestamp", "database", "hosts", "forests", "totals"}
+
+    missing = REQUIRED_KEYS - set(snap.keys())
+    if missing:
+        return {"error": f"Missing required keys: {', '.join(sorted(missing))}"}
+
+    if snap.get("version", 0) != 1:
+        return {"error": f"Unsupported snapshot version: {snap.get('version')}"}
+
+    db = snap.get("database", "")
+    try:
+        validate_database_name(db)
+    except ValueError:
+        return {"error": f"Invalid database name: '{db}'"}
+
+    saved_path = save_snapshot(snap)
+    t = snap.get("totals", {})
+    return {
+        "status": "ok",
+        "filename": saved_path.name,
+        "database": db,
+        "documents": t.get("documents", 0),
+    }
+
+
 def import_snapshots(file_paths):
     """Import snapshot JSON files from disconnected environments.
 

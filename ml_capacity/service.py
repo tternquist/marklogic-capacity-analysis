@@ -8,6 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from ml_capacity.formatting import fmt_mb
 from ml_capacity.snapshot import (
     SNAPSHOT_DIR, collect_snapshot, save_snapshot, prune_snapshots, load_snapshots,
+    import_snapshot_data,
 )
 from ml_capacity.prometheus import snapshot_to_prometheus, push_otlp
 
@@ -144,6 +145,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
             path, params = self._parse_request()
             if path == "/api/snapshot":
                 self._handle_take_snapshot()
+            elif path == "/api/snapshots/import":
+                self._handle_import_snapshot()
             else:
                 self._respond(404, "text/plain", "Not Found")
 
@@ -342,6 +345,29 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 self._respond(500, "application/json",
                               json.dumps({"error": str(e)}))
 
+        def _handle_import_snapshot(self):
+            """Import a snapshot JSON from the request body."""
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len == 0:
+                    self._respond(400, "application/json",
+                                  '{"error":"Empty request body"}')
+                    return
+                body = self.rfile.read(content_len)
+                snap = json.loads(body)
+            except (json.JSONDecodeError, ValueError) as e:
+                self._respond(400, "application/json",
+                              json.dumps({"error": f"Invalid JSON: {e}"}))
+                return
+
+            result = import_snapshot_data(snap)
+            if result.get("error"):
+                self._respond(400, "application/json", json.dumps(result))
+                return
+
+            self._respond(200, "application/json",
+                          json.dumps(result, default=str))
+
         def _serve_ui(self):
             self._respond(200, "text/html", _WEB_UI_HTML)
 
@@ -530,7 +556,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   <div id="tab-snapshots" class="tab-content">
     <div class="snap-toolbar">
       <h3 style="margin:0;border:none;padding:0">Saved Snapshots</h3>
-      <button class="btn btn-primary" id="takeSnapshotBtn" onclick="takeSnapshot()">Take Snapshot</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" id="takeSnapshotBtn" onclick="takeSnapshot()">Take Snapshot</button>
+        <button class="btn" onclick="document.getElementById('import-file').click()">Import File</button>
+        <button class="btn" onclick="showImportModal()">Paste JSON</button>
+        <input type="file" id="import-file" accept=".json" multiple style="display:none" onchange="importFiles(this.files)">
+      </div>
     </div>
     <div class="card" id="snap-list"><div class="loading">Loading...</div></div>
   </div>
@@ -545,6 +576,24 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
       <button class="modal-close" onclick="closeModal()">&times;</button>
     </div>
     <div class="modal-body"><pre id="modal-body"></pre></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="import-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Import Snapshot</h3>
+      <button class="modal-close" onclick="closeImportModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:#8b949e;margin:0 0 8px">Paste MLCA snapshot JSON (from <code>collect-snapshot.sjs</code> or Query Console):</p>
+      <textarea id="import-json" style="width:100%;height:300px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;resize:vertical" placeholder='{"version":1,"timestamp":"...","database":"...","hosts":[...],...}'></textarea>
+      <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+        <button class="btn" onclick="closeImportModal()">Cancel</button>
+        <button class="btn btn-primary" id="importPasteBtn" onclick="importPastedJson()">Import</button>
+      </div>
+      <div id="import-status" style="margin-top:8px;font-size:12px"></div>
+    </div>
   </div>
 </div>
 
@@ -1023,6 +1072,70 @@ async function takeSnapshot() {
     }
   } catch(e) { alert('Snapshot error: ' + e.message); }
   btn.disabled = false; btn.textContent = 'Take Snapshot';
+}
+
+// Import functions
+function showImportModal() {
+  document.getElementById('import-json').value = '';
+  document.getElementById('import-status').innerHTML = '';
+  document.getElementById('import-modal').classList.add('show');
+  document.getElementById('import-json').focus();
+}
+function closeImportModal() { document.getElementById('import-modal').classList.remove('show'); }
+document.getElementById('import-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeImportModal();
+});
+
+async function doImport(snapJson) {
+  var resp = await fetch('/api/snapshots/import', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: typeof snapJson === 'string' ? snapJson : JSON.stringify(snapJson)
+  });
+  return { ok: resp.ok, data: await resp.json() };
+}
+
+async function importPastedJson() {
+  var btn = document.getElementById('importPasteBtn');
+  var status = document.getElementById('import-status');
+  var raw = document.getElementById('import-json').value.trim();
+  if (!raw) { status.innerHTML = '<span style="color:#f85149">Paste snapshot JSON first</span>'; return; }
+  var snap;
+  try { snap = JSON.parse(raw); } catch(e) {
+    status.innerHTML = '<span style="color:#f85149">Invalid JSON: ' + e.message + '</span>';
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Importing...';
+  status.innerHTML = '';
+  try {
+    var r = await doImport(snap);
+    if (r.ok) {
+      status.innerHTML = '<span style="color:#3fb950">Imported: ' + r.data.filename +
+        ' (' + fmtNum(r.data.documents) + ' docs)</span>';
+      refreshSnapshots();
+      loadDatabases();
+    } else {
+      status.innerHTML = '<span style="color:#f85149">' + (r.data.error || 'Import failed') + '</span>';
+    }
+  } catch(e) { status.innerHTML = '<span style="color:#f85149">Error: ' + e.message + '</span>'; }
+  btn.disabled = false; btn.textContent = 'Import';
+}
+
+async function importFiles(fileList) {
+  var ok = 0, fail = 0;
+  for (var i = 0; i < fileList.length; i++) {
+    try {
+      var text = await fileList[i].text();
+      var snap = JSON.parse(text);
+      var r = await doImport(snap);
+      if (r.ok) ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  document.getElementById('import-file').value = '';
+  if (ok > 0) { refreshSnapshots(); loadDatabases(); }
+  var msg = ok + ' snapshot(s) imported';
+  if (fail > 0) msg += ', ' + fail + ' failed';
+  alert(msg);
 }
 
 // Charts
