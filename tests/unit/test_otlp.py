@@ -28,8 +28,7 @@ class TestPushOtlp:
             resp.__exit__ = MagicMock(return_value=False)
             return resp
 
-        # push_otlp re-imports urlopen from urllib.request locally
-        with patch("urllib.request.urlopen", mock_urlopen):
+        with patch("ml_capacity.prometheus.urlopen", mock_urlopen):
             mc.push_otlp(snap, endpoint)
 
         return captured

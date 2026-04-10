@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import ml_capacity as mc
+import ml_capacity.snapshot as snap_mod
 
 
 class TestParseInterval:
@@ -89,8 +90,8 @@ class TestValidateDatabaseName:
 
 class TestSaveSnapshot:
     def test_save_creates_file(self, tmp_path, sample_snapshot):
-        original = mc.SNAPSHOT_DIR
-        mc.SNAPSHOT_DIR = tmp_path
+        original = snap_mod.SNAPSHOT_DIR
+        snap_mod.SNAPSHOT_DIR = tmp_path
         try:
             path = mc.save_snapshot(sample_snapshot)
             assert path.exists()
@@ -102,18 +103,18 @@ class TestSaveSnapshot:
             assert saved["database"] == "Documents"
             assert saved["totals"]["documents"] == 100000
         finally:
-            mc.SNAPSHOT_DIR = original
+            snap_mod.SNAPSHOT_DIR = original
 
     def test_save_creates_directory(self, tmp_path, sample_snapshot):
         snap_dir = tmp_path / "new_dir"
-        original = mc.SNAPSHOT_DIR
-        mc.SNAPSHOT_DIR = snap_dir
+        original = snap_mod.SNAPSHOT_DIR
+        snap_mod.SNAPSHOT_DIR = snap_dir
         try:
             path = mc.save_snapshot(sample_snapshot)
             assert snap_dir.exists()
             assert path.exists()
         finally:
-            mc.SNAPSHOT_DIR = original
+            snap_mod.SNAPSHOT_DIR = original
 
 
 class TestLoadSnapshots:
@@ -139,22 +140,22 @@ class TestLoadSnapshots:
         assert all("_file" in s for s in snaps)
 
     def test_load_empty_dir(self, tmp_path):
-        original = mc.SNAPSHOT_DIR
-        mc.SNAPSHOT_DIR = tmp_path
+        original = snap_mod.SNAPSHOT_DIR
+        snap_mod.SNAPSHOT_DIR = tmp_path
         try:
             snaps = mc.load_snapshots()
             assert snaps == []
         finally:
-            mc.SNAPSHOT_DIR = original
+            snap_mod.SNAPSHOT_DIR = original
 
     def test_load_nonexistent_dir(self, tmp_path):
-        original = mc.SNAPSHOT_DIR
-        mc.SNAPSHOT_DIR = tmp_path / "does_not_exist"
+        original = snap_mod.SNAPSHOT_DIR
+        snap_mod.SNAPSHOT_DIR = tmp_path / "does_not_exist"
         try:
             snaps = mc.load_snapshots()
             assert snaps == []
         finally:
-            mc.SNAPSHOT_DIR = original
+            snap_mod.SNAPSHOT_DIR = original
 
     def test_load_skips_malformed_json(self, tmp_snapshot_dir):
         # Add a malformed file
@@ -183,13 +184,13 @@ class TestPruneSnapshots:
         assert len(mc.load_snapshots()) == 3
 
     def test_prune_nonexistent_dir(self, tmp_path):
-        original = mc.SNAPSHOT_DIR
-        mc.SNAPSHOT_DIR = tmp_path / "nope"
+        original = snap_mod.SNAPSHOT_DIR
+        snap_mod.SNAPSHOT_DIR = tmp_path / "nope"
         try:
             removed = mc.prune_snapshots(retention_days=1)
             assert removed == 0
         finally:
-            mc.SNAPSHOT_DIR = original
+            snap_mod.SNAPSHOT_DIR = original
 
 
 class TestFmtMb:

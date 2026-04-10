@@ -156,9 +156,9 @@ def snapshot_pair():
 @pytest.fixture
 def tmp_snapshot_dir(tmp_path):
     """Create a temp snapshot dir with some snapshot files."""
-    import ml_capacity as mc
-    original_dir = mc.SNAPSHOT_DIR
-    mc.SNAPSHOT_DIR = tmp_path
+    import ml_capacity.snapshot as snap_mod
+    original_dir = snap_mod.SNAPSHOT_DIR
+    snap_mod.SNAPSHOT_DIR = tmp_path
 
     # Create a few snapshot files
     for i, (ts, docs) in enumerate([
@@ -173,4 +173,4 @@ def tmp_snapshot_dir(tmp_path):
 
     yield tmp_path
 
-    mc.SNAPSHOT_DIR = original_dir
+    snap_mod.SNAPSHOT_DIR = original_dir

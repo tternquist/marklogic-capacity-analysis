@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import ml_capacity as mc
+import ml_capacity.snapshot as snap_mod
 from tests.conftest import _make_snapshot
 
 
@@ -37,8 +38,8 @@ def _start_service(tmp_path, api_token=None):
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
     # Save a snapshot file for the service to find
-    original_dir = mc.SNAPSHOT_DIR
-    mc.SNAPSHOT_DIR = tmp_path
+    original_dir = snap_mod.SNAPSHOT_DIR
+    snap_mod.SNAPSHOT_DIR = tmp_path
     snap = _make_snapshot()
     mc.save_snapshot(snap)
 
@@ -112,7 +113,7 @@ def _start_service(tmp_path, api_token=None):
                     self._respond(400, "application/json",
                                   '{"error":"Invalid filename"}')
                     return
-                fpath = mc.SNAPSHOT_DIR / filename
+                fpath = snap_mod.SNAPSHOT_DIR / filename
                 if not fpath.exists():
                     self._respond(404, "application/json",
                                   '{"error":"Not found"}')
@@ -141,7 +142,7 @@ def _start_service(tmp_path, api_token=None):
                     self._respond(400, "application/json",
                                   '{"error":"Invalid filename"}')
                     return
-                fpath = mc.SNAPSHOT_DIR / filename
+                fpath = snap_mod.SNAPSHOT_DIR / filename
                 if not fpath.exists():
                     self._respond(404, "application/json",
                                   '{"error":"Not found"}')
@@ -173,7 +174,7 @@ def _start_service(tmp_path, api_token=None):
 
         def close(self):
             server.shutdown()
-            mc.SNAPSHOT_DIR = self.original_dir
+            snap_mod.SNAPSHOT_DIR = self.original_dir
 
     fixture = ServiceFixture()
     yield fixture
