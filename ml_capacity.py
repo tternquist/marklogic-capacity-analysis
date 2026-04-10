@@ -3139,79 +3139,147 @@ async function refreshDashboard() {
     }
 
     // Capacity projections from trend data
+    // Methodology: use linear regression on disk (stable, monotonic) as
+    // primary growth signal.  Forest memory is volatile due to ML stand
+    // merges/flushes, so we use regression to smooth it.  Per-doc cost
+    // uses marginal cost from recent snapshots (amortisation means average
+    // cost drops as the collection grows — marginal is more predictive).
     try {
       var trend = await (await fetch('/api/trend' + dbParam())).json();
       var projSec = document.getElementById('projections-section');
-      if (trend.length >= 2) {
+      // Deduplicate trend points with same doc count (keep last)
+      var seen = {}; var dedupTrend = [];
+      trend.forEach(function(p) {
+        var key = p.documents;
+        if (seen[key] !== undefined) dedupTrend[seen[key]] = p;
+        else { seen[key] = dedupTrend.length; dedupTrend.push(p); }
+      });
+      trend = dedupTrend;
+
+      if (trend.length >= 3) {
         var first = trend[0], last = trend[trend.length - 1];
         var t0 = new Date(first.timestamp).getTime(), t1 = new Date(last.timestamp).getTime();
         var spanDays = (t1 - t0) / 86400000;
-        if (spanDays > 0) {
-          var forestFirst = first.host_forest_mb || 0, forestLast = last.host_forest_mb || 0;
-          var docsFirst = first.documents || 0, docsLast = last.documents || 0;
-          var diskFirst = first.forest_disk_mb || 0, diskLast = last.forest_disk_mb || 0;
-          var forestDelta = forestLast - forestFirst;
-          var docDelta = docsLast - docsFirst;
-          var diskDelta = diskLast - diskFirst;
-          var dailyForest = forestDelta / spanDays;
-          var dailyDocs = docDelta / spanDays;
-          var dailyDisk = diskDelta / spanDays;
 
-          var proj = '';
-          // Memory runway
-          if (forestDelta > 0 && headroom > 0) {
-            var daysUntilMem = headroom / dailyForest;
-            var etaDate = new Date(Date.now() + daysUntilMem * 86400000);
-            var etaStr = etaDate.getFullYear() + '-' + String(etaDate.getMonth()+1).padStart(2,'0') + '-' + String(etaDate.getDate()).padStart(2,'0');
-            var runwayClass = daysUntilMem < 30 ? 'crit' : daysUntilMem < 90 ? 'warn' : 'good';
-            proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
-              metric('Forest growth rate', fmt(dailyForest) + '/day') +
-              metric('Days until ceiling', '<span class="metric-val ' + runwayClass + '">' + Math.round(daysUntilMem) + ' days</span>', '') +
-              metric('ETA', etaStr) +
-              metric('Observed period', spanDays.toFixed(1) + ' days (' + trend.length + ' snapshots)');
-
-            if (docDelta > 0) {
-              var bytesPerDoc = (forestDelta * 1048576) / docDelta;
-              var docsUntilCeiling = Math.round((headroom * 1048576) / bytesPerDoc);
-              proj += metric('Forest memory/doc', Math.round(bytesPerDoc).toLocaleString() + ' bytes') +
-                      metric('Docs until ceiling', '<span class="metric-val ' + runwayClass + '">' + fmtNum(docsUntilCeiling) + '</span>', '');
-            }
-            proj += '</div>';
-          } else if (forestDelta <= 0) {
-            proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
-              metric('Status', 'Stable or shrinking', 'good') +
-              metric('Observed period', spanDays.toFixed(1) + ' days (' + trend.length + ' snapshots)') +
-              '</div>';
+        // Linear regression helper: returns {slope, intercept, r2}
+        function linReg(xs, ys) {
+          var n = xs.length, sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0;
+          for (var i = 0; i < n; i++) {
+            sx += xs[i]; sy += ys[i]; sxy += xs[i]*ys[i];
+            sx2 += xs[i]*xs[i]; sy2 += ys[i]*ys[i];
           }
-
-          // Disk runway
-          var diskRemain = Number((snap.database_status || {}).least_remaining_mb || 0);
-          if (diskDelta > 0 && diskRemain > 0) {
-            var daysUntilDisk = diskRemain / dailyDisk;
-            var diskEta = new Date(Date.now() + daysUntilDisk * 86400000);
-            var diskEtaStr = diskEta.getFullYear() + '-' + String(diskEta.getMonth()+1).padStart(2,'0') + '-' + String(diskEta.getDate()).padStart(2,'0');
-            var diskClass = daysUntilDisk < 30 ? 'crit' : daysUntilDisk < 90 ? 'warn' : 'good';
-            proj += '<div class="card"><div class="card-title">Disk Runway</div>' +
-              metric('Disk growth rate', fmt(dailyDisk) + '/day') +
-              metric('Remaining', fmt(diskRemain)) +
-              metric('Days until full', '<span class="metric-val ' + diskClass + '">' + Math.round(daysUntilDisk) + ' days</span>', '') +
-              metric('ETA', diskEtaStr) +
-              '</div>';
+          var denom = n*sx2 - sx*sx;
+          if (denom === 0) return { slope: 0, intercept: 0, r2: 0 };
+          var slope = (n*sxy - sx*sy) / denom;
+          var intercept = (sy - slope*sx) / n;
+          var ssRes = 0, ssTot = 0, yMean = sy/n;
+          for (var i = 0; i < n; i++) {
+            var yHat = slope*xs[i] + intercept;
+            ssRes += (ys[i]-yHat)*(ys[i]-yHat);
+            ssTot += (ys[i]-yMean)*(ys[i]-yMean);
           }
+          return { slope: slope, intercept: intercept, r2: ssTot > 0 ? 1 - ssRes/ssTot : 0 };
+        }
 
-          // Document growth
-          if (dailyDocs > 0) {
-            proj += '<div class="card"><div class="card-title">Document Growth</div>' +
-              metric('Current count', fmtNum(docsLast)) +
-              metric('Growth rate', fmtNum(Math.round(dailyDocs)) + '/day') +
-              metric('Growth over period', '+' + fmtNum(docDelta)) +
-              '</div>';
+        // Regression on docs (x) vs disk (y) — most stable relationship
+        var xDocs = trend.map(function(p) { return p.documents; });
+        var yDisk = trend.map(function(p) { return p.forest_disk_mb; });
+        var yForest = trend.map(function(p) { return p.host_forest_mb; });
+        var diskReg = linReg(xDocs, yDisk);
+        var forestReg = linReg(xDocs, yForest);
+
+        // Marginal cost: use last 30% of snapshots for recent trend
+        var recentStart = Math.max(0, Math.floor(trend.length * 0.7));
+        var recent = trend.slice(recentStart);
+        var rFirst = recent[0], rLast = recent[recent.length - 1];
+        var rDocDelta = rLast.documents - rFirst.documents;
+        var rForestDelta = rLast.host_forest_mb - rFirst.host_forest_mb;
+        var rDiskDelta = rLast.forest_disk_mb - rFirst.forest_disk_mb;
+
+        // Marginal bytes/doc from regression slope (more stable than point-to-point)
+        var marginalForestBytes = forestReg.slope * 1048576;  // MB/doc -> bytes/doc
+        var marginalDiskBytes = diskReg.slope * 1048576;
+
+        // Time-based rates using regression on time
+        var xTimes = trend.map(function(p) { return (new Date(p.timestamp).getTime() - t0) / 86400000; });
+        var diskTimeReg = linReg(xTimes, yDisk);
+        var forestTimeReg = linReg(xTimes, yForest);
+        var docsTimeReg = linReg(xTimes, xDocs);
+
+        // Account for base_mb growth (it's NOT fixed — grows with data)
+        var yBase = trend.map(function(p) { return (p.host_base_mb||0) + (p.host_file_mb||0); });
+        var baseTimeReg = linReg(xTimes, yBase);
+
+        // Effective daily memory growth = forest growth + base growth
+        var dailyMemGrowth = forestTimeReg.slope + baseTimeReg.slope;
+        var curBase = last.host_base_mb || 0;
+        var curFile = last.host_file_mb || 0;
+        var effectiveHeadroom = ceiling - cache - curBase - curFile - forest;
+
+        var proj = '';
+
+        // Memory Runway — using regression-smoothed rates
+        if (dailyMemGrowth > 0 && effectiveHeadroom > 0) {
+          var daysUntilMem = effectiveHeadroom / dailyMemGrowth;
+          var etaDate = new Date(Date.now() + daysUntilMem * 86400000);
+          var etaStr = etaDate.getFullYear() + '-' + String(etaDate.getMonth()+1).padStart(2,'0') + '-' + String(etaDate.getDate()).padStart(2,'0');
+          var runwayClass = daysUntilMem < 30 ? 'crit' : daysUntilMem < 90 ? 'warn' : 'good';
+          var confidence = forestTimeReg.r2;
+          var confLabel = confidence > 0.9 ? 'high' : confidence > 0.7 ? 'medium' : 'low';
+          var confClass = confidence > 0.9 ? 'good' : confidence > 0.7 ? 'warn' : 'crit';
+
+          proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
+            metric('Days until ceiling', '<span class="metric-val ' + runwayClass + '">' + Math.round(daysUntilMem) + ' days</span>', '') +
+            metric('ETA', etaStr) +
+            metric('Forest growth (regressed)', fmt(forestTimeReg.slope) + '/day') +
+            metric('Base+file growth', fmt(baseTimeReg.slope) + '/day') +
+            metric('Combined growth', fmt(dailyMemGrowth) + '/day') +
+            metric('Confidence (R\\u00b2)', '<span class="metric-val ' + confClass + '">' + confLabel + ' (' + confidence.toFixed(2) + ')</span>', '');
+
+          // Document-based projection using regression slope
+          if (marginalForestBytes > 0) {
+            var docsUntilCeiling = Math.round((effectiveHeadroom * 1048576) / marginalForestBytes);
+            proj += metric('Marginal memory/doc', Math.round(marginalForestBytes).toLocaleString() + ' bytes') +
+                    metric('Est. docs until ceiling', '<span class="metric-val ' + runwayClass + '">' + fmtNum(docsUntilCeiling) + '</span>', '');
           }
+          proj += metric('Snapshots analyzed', trend.length + ' over ' + spanDays.toFixed(1) + ' days') +
+            '</div>';
+        } else if (dailyMemGrowth <= 0) {
+          proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
+            metric('Status', 'Stable or shrinking', 'good') +
+            metric('Snapshots', trend.length + ' over ' + spanDays.toFixed(1) + ' days') +
+            '</div>';
+        }
 
-          if (proj) {
-            document.getElementById('projections').innerHTML = proj;
-            projSec.style.display = 'block';
-          } else { projSec.style.display = 'none'; }
+        // Disk Runway — most reliable projection
+        var diskRemain = Number((snap.database_status || {}).least_remaining_mb || 0);
+        if (diskTimeReg.slope > 0 && diskRemain > 0) {
+          var daysUntilDisk = diskRemain / diskTimeReg.slope;
+          var diskEta = new Date(Date.now() + daysUntilDisk * 86400000);
+          var diskEtaStr = diskEta.getFullYear() + '-' + String(diskEta.getMonth()+1).padStart(2,'0') + '-' + String(diskEta.getDate()).padStart(2,'0');
+          var diskClass = daysUntilDisk < 30 ? 'crit' : daysUntilDisk < 90 ? 'warn' : 'good';
+          proj += '<div class="card"><div class="card-title">Disk Runway</div>' +
+            metric('Growth rate (regressed)', fmt(diskTimeReg.slope) + '/day') +
+            metric('Remaining', fmt(diskRemain)) +
+            metric('Days until full', '<span class="metric-val ' + diskClass + '">' + Math.round(daysUntilDisk) + ' days</span>', '') +
+            metric('ETA', diskEtaStr) +
+            metric('Confidence (R\\u00b2)', diskTimeReg.r2.toFixed(2)) +
+            metric('Disk/doc (regressed)', Math.round(diskReg.slope * 1048576).toLocaleString() + ' bytes') +
+            '</div>';
+        }
+
+        // Document growth
+        if (docsTimeReg.slope > 0) {
+          proj += '<div class="card"><div class="card-title">Document Growth</div>' +
+            metric('Current count', fmtNum(last.documents)) +
+            metric('Growth rate (regressed)', fmtNum(Math.round(docsTimeReg.slope)) + '/day') +
+            metric('Total growth', '+' + fmtNum(last.documents - first.documents)) +
+            '</div>';
+        }
+
+        if (proj) {
+          document.getElementById('projections').innerHTML = proj;
+          projSec.style.display = 'block';
         } else { projSec.style.display = 'none'; }
       } else { projSec.style.display = 'none'; }
     } catch(e2) { /* projections are optional */ }
