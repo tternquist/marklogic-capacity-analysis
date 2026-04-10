@@ -140,10 +140,54 @@ Snapshots capture all metrics in a single JSON file for later analysis.
 | `--trend` | Show growth curves and runway projections from saved snapshots |
 | `--compare N` | Diff the most recent snapshot vs snapshot #N |
 
+### Configuration Stability Check
+
+Both `--trend` and `--compare` run a configuration drift check before showing
+results. Trend projections are only meaningful when the underlying configuration
+stays constant — if someone added a host, resized the cache, or added range
+indexes between snapshots, the growth baseline shifted and projections become
+unreliable.
+
+Checked fields:
+
+| Category | Fields |
+|---|---|
+| Cluster | MarkLogic version, host count |
+| Per-host | System RAM, ML memory limit, cache allocation (list+tree), CPU cores |
+| Database | Forest count, all `in-memory-*` settings |
+| Indexes | Range element/path/field index counts, enabled boolean index count |
+
+If the configuration is stable, you'll see:
+
+```
+Configuration Stability Check
+    STABLE — cluster config, cache sizes, index settings,
+    and system resources are consistent across all 5 snapshots.
+```
+
+If drift is detected:
+
+```
+Configuration Stability Check
+    DRIFT DETECTED — configuration changed between snapshots.
+    Trend projections may be unreliable across these changes.
+
+    ! In-memory list size (MB)
+        256 -> 512  (snapshot #5, 2026-04-11 08:00:00)
+    ! Element range index count
+        3 -> 5  (snapshot #5, 2026-04-11 08:00:00)
+    ! host[ml-1.example.com].cache_alloc_mb
+        5121 -> 8192  (snapshot #5, 2026-04-11 08:00:00)
+
+    Tip: For accurate trends, compare snapshots with the same
+    configuration. Use --compare N to diff specific snapshots.
+```
+
 ### Trend Analysis
 
 With 2+ snapshots, `--trend` shows:
 
+- **Configuration stability check** (see above)
 - **Growth over time**: Documents, forest disk, forest memory, RSS, and fragments
   with daily rates
 - **Runway projections**: Days until memory ceiling, disk full, and fragment limit
@@ -167,6 +211,7 @@ Runway Projections (based on observed growth rate)
 
 `--compare 0` diffs the current state vs snapshot #0:
 
+- **Configuration stability check** between the two snapshots
 - Metric deltas with absolute and percentage changes
 - Marginal cost per document (disk bytes/doc, forest memory bytes/doc) computed
   from actual growth between the two snapshots
