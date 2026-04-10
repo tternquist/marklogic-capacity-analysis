@@ -2164,6 +2164,629 @@ def report_compare(database, compare_idx):
             print(f"\n    {color('For detailed analysis: --index-impact', DIM)}")
 
 
+# ── Prometheus format ───────────────────────────────────────────────
+
+def snapshot_to_prometheus(snap):
+    """Convert a snapshot to Prometheus text exposition format.
+
+    Returns a string of Prometheus-format metrics. Works for both
+    one-shot (--format prometheus) and service (/metrics endpoint).
+    """
+    lines = []
+
+    def gauge(name, help_text, value, labels=None):
+        if value is None:
+            return
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+        label_str = ""
+        if labels:
+            pairs = ",".join(f'{k}="{v}"' for k, v in labels.items())
+            label_str = f"{{{pairs}}}"
+        lines.append(f"{name}{label_str} {value}")
+
+    db = snap.get("database", "unknown")
+    t = snap.get("totals", {})
+    db_labels = {"database": db}
+
+    # ── Document & fragment metrics ────────────────────────────────
+    gauge("mlca_documents_total",
+          "Total document count",
+          t.get("documents"), db_labels)
+    gauge("mlca_fragments_active",
+          "Active fragment count",
+          t.get("active_fragments"), db_labels)
+    gauge("mlca_fragments_deleted",
+          "Deleted fragment count (fragmentation indicator)",
+          t.get("deleted_fragments"), db_labels)
+
+    active = t.get("active_fragments", 0)
+    deleted = t.get("deleted_fragments", 0)
+    total_frags = active + deleted
+    if total_frags > 0:
+        gauge("mlca_fragmentation_ratio",
+              "Ratio of deleted to total fragments",
+              round(deleted / total_frags, 4), db_labels)
+
+    # ── Forest storage ─────────────────────────────────────────────
+    gauge("mlca_forest_disk_mb",
+          "Total on-disk size of all forests in MB",
+          t.get("forest_disk_mb"), db_labels)
+    gauge("mlca_forest_memory_mb",
+          "Forest in-memory stand data in MB (per-db sum)",
+          t.get("forest_memory_mb"), db_labels)
+
+    # ── Host memory breakdown ──────────────────────────────────────
+    for host in snap.get("hosts", []):
+        hostname = host.get("hostname", "unknown")
+        h_labels = {"host": hostname}
+
+        gauge("mlca_host_rss_mb",
+              "MarkLogic process resident set size in MB",
+              host.get("memory-process-rss-mb"), h_labels)
+        gauge("mlca_host_rss_hwm_mb",
+              "Peak RSS since last restart in MB",
+              host.get("memory-process-rss-hwm-mb"), h_labels)
+        gauge("mlca_host_cache_mb",
+              "Allocated list + compressed tree cache in MB (fixed)",
+              host.get("memory-cache-size-mb"), h_labels)
+        gauge("mlca_host_forest_mb",
+              "Forest in-memory stand memory at host level in MB",
+              host.get("memory-forest-size-mb"), h_labels)
+        gauge("mlca_host_base_mb",
+              "Base ML overhead in MB (threads, code — fixed)",
+              host.get("host-size-mb"), h_labels)
+        gauge("mlca_host_file_mb",
+              "OS file cache (mmap) pages in MB",
+              host.get("memory-file-size-mb"), h_labels)
+        gauge("mlca_host_swap_mb",
+              "ML process swap usage in MB (non-zero = memory pressure)",
+              host.get("memory-process-swap-mb"), h_labels)
+        gauge("mlca_system_total_mb",
+              "Total system RAM in MB",
+              host.get("memory-system-total-mb"), h_labels)
+        gauge("mlca_system_free_mb",
+              "Free system RAM in MB",
+              host.get("memory-system-free-mb"), h_labels)
+        gauge("mlca_ml_limit_mb",
+              "Configured MarkLogic memory limit in MB",
+              host.get("memory-size-mb"), h_labels)
+        gauge("mlca_host_pagein_rate",
+              "System page-in rate in MB/s",
+              host.get("memory-system-pagein-rate"), h_labels)
+        gauge("mlca_host_pageout_rate",
+              "System page-out rate in MB/s",
+              host.get("memory-system-pageout-rate"), h_labels)
+        gauge("mlca_host_swapin_rate",
+              "System swap-in rate in MB/s (non-zero = severe pressure)",
+              host.get("memory-system-swapin-rate"), h_labels)
+
+    # ── Memory capacity (computed) ─────────────────────────────────
+    sys_total = t.get("system_total_mb", 0)
+    cache_mb = t.get("host_cache_mb", 0)
+    base_mb = t.get("host_base_mb", 0)
+    file_mb = t.get("host_file_mb", 0)
+    forest_mb = t.get("host_forest_mb", 0)
+    fixed = cache_mb + base_mb + file_mb
+
+    if sys_total > 0:
+        ceiling = sys_total * 0.80
+        headroom = ceiling - fixed - forest_mb
+        gauge("mlca_memory_ceiling_mb",
+              "Memory ceiling (80% of system RAM) in MB",
+              round(ceiling, 1), db_labels)
+        gauge("mlca_memory_fixed_mb",
+              "Fixed memory components (cache + base + file) in MB",
+              round(fixed, 1), db_labels)
+        gauge("mlca_memory_headroom_mb",
+              "Remaining memory headroom for forest growth in MB",
+              round(headroom, 1), db_labels)
+        if ceiling > 0:
+            gauge("mlca_memory_utilization_ratio",
+                  "Memory utilization ratio (fixed + forest) / ceiling",
+                  round((fixed + forest_mb) / ceiling, 4), db_labels)
+
+    # ── Disk capacity ──────────────────────────────────────────────
+    db_status = snap.get("database_status", {})
+    remaining = db_status.get("least_remaining_mb", 0)
+    if remaining:
+        gauge("mlca_disk_remaining_mb",
+              "Least remaining disk space on any forest in MB",
+              float(remaining), db_labels)
+
+    docs = t.get("documents", 0)
+    disk = t.get("forest_disk_mb", 0)
+    if docs > 0 and disk > 0:
+        gauge("mlca_disk_bytes_per_doc",
+              "Disk bytes per document",
+              round(disk * 1024 * 1024 / docs, 0), db_labels)
+
+    # ── Per-index memory (ML 11+) ──────────────────────────────────
+    idx_mem = snap.get("index_memory") or {}
+    for idx in idx_mem.get("indexes", []):
+        mem = idx.get("totalMemoryBytes", 0)
+        disk_b = idx.get("totalOnDiskBytes", 0)
+        if not mem and not disk_b:
+            continue
+        name = idx.get("localname") or idx.get("pathExpression") or idx.get("indexType", "unknown")
+        stype = idx.get("scalarType") or ""
+        idx_label = f"{name}({stype})" if stype else name
+        i_labels = {"database": db, "index": idx_label}
+        if mem:
+            gauge("mlca_index_memory_bytes",
+                  "Per-index memory in bytes",
+                  mem, i_labels)
+        if disk_b:
+            gauge("mlca_index_disk_bytes",
+                  "Per-index on-disk size in bytes",
+                  disk_b, i_labels)
+
+    # ── Stand memory components ────────────────────────────────────
+    stand_summaries = idx_mem.get("standSummaries", [])
+    if stand_summaries:
+        agg = {}
+        for ss in stand_summaries:
+            for k, v in ss.get("summary", {}).items():
+                agg[k] = agg.get(k, 0) + (v or 0)
+        component_metrics = {
+            "rangeIndexesBytes":    ("mlca_stand_range_indexes_bytes", "Range index data in bytes"),
+            "tripleIndexBytes":     ("mlca_stand_triple_index_bytes", "Triple index data in bytes"),
+            "timestampsFileBytes":  ("mlca_stand_timestamps_bytes", "Timestamp data in bytes"),
+            "listFileBytes":        ("mlca_stand_list_bytes", "List index data in bytes"),
+            "treeFileBytes":        ("mlca_stand_tree_bytes", "Tree index data in bytes"),
+        }
+        for key, (metric_name, help_text) in component_metrics.items():
+            if agg.get(key, 0) > 0:
+                gauge(metric_name, help_text, agg[key], db_labels)
+
+    lines.append("")  # trailing newline
+    return "\n".join(lines)
+
+
+# ── Service mode ───────────────────────────────────────────────────
+
+def parse_interval(s):
+    """Parse interval string like '5m', '15m', '1h', '30s' to seconds."""
+    s = s.strip().lower()
+    if s.endswith("s"):
+        return int(s[:-1])
+    if s.endswith("m"):
+        return int(s[:-1]) * 60
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    return int(s)  # bare number = seconds
+
+
+def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
+    """Run MLCA as a persistent service with HTTP endpoints.
+
+    Collects snapshots on schedule, serves /metrics, /api/*, and web UI.
+    """
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    # Shared state
+    latest_snapshots = {}  # database -> latest snap
+    lock = threading.Lock()
+
+    def collect_all():
+        """Collect snapshots for all monitored databases."""
+        for db in databases:
+            try:
+                snap = collect_snapshot(client, db)
+                save_snapshot(snap)
+                with lock:
+                    latest_snapshots[db] = snap
+                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
+                      f"Collected {db}: {snap['totals']['documents']:,} docs, "
+                      f"forest={fmt_mb(snap['totals']['host_forest_mb'])}")
+            except Exception as e:
+                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
+                      f"Error collecting {db}: {e}")
+
+    def schedule_loop():
+        """Run collection on a repeating interval."""
+        while True:
+            collect_all()
+            # Push to OTLP if configured
+            if otlp_endpoint:
+                with lock:
+                    for db, snap in latest_snapshots.items():
+                        try:
+                            push_otlp(snap, otlp_endpoint)
+                        except Exception as e:
+                            print(f"  OTLP push error: {e}")
+            threading.Event().wait(interval_sec)
+
+    class MLCAHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass  # suppress default access logs
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+
+            if path == "/metrics":
+                self._serve_metrics()
+            elif path == "/api/snapshot":
+                self._serve_json_snapshot()
+            elif path == "/api/snapshots":
+                self._serve_json_snapshots_list()
+            elif path == "/api/trend":
+                self._serve_json_trend()
+            elif path == "/":
+                self._serve_ui()
+            elif path == "/health":
+                self._respond(200, "application/json", '{"status":"ok"}')
+            else:
+                self._respond(404, "text/plain", "Not Found")
+
+        def _serve_metrics(self):
+            with lock:
+                all_metrics = []
+                for db, snap in latest_snapshots.items():
+                    all_metrics.append(snapshot_to_prometheus(snap))
+            body = "\n".join(all_metrics) if all_metrics else "# No data collected yet\n"
+            self._respond(200, "text/plain; version=0.0.4; charset=utf-8", body)
+
+        def _serve_json_snapshot(self):
+            with lock:
+                if latest_snapshots:
+                    db = list(latest_snapshots.keys())[0]
+                    snap = latest_snapshots[db]
+                    self._respond(200, "application/json",
+                                  json.dumps(snap, indent=2, default=str))
+                else:
+                    self._respond(503, "application/json",
+                                  '{"error":"No data collected yet"}')
+
+        def _serve_json_snapshots_list(self):
+            all_snaps = load_snapshots()
+            summary = []
+            for s in all_snaps:
+                t = s.get("totals", {})
+                summary.append({
+                    "timestamp": s.get("timestamp"),
+                    "database": s.get("database"),
+                    "documents": t.get("documents", 0),
+                    "forest_disk_mb": t.get("forest_disk_mb", 0),
+                    "host_forest_mb": t.get("host_forest_mb", 0),
+                    "host_rss_mb": t.get("host_rss_mb", 0),
+                })
+            self._respond(200, "application/json",
+                          json.dumps(summary, indent=2, default=str))
+
+        def _serve_json_trend(self):
+            # Return time-series data for charting
+            all_snaps = load_snapshots()
+            points = []
+            for s in all_snaps:
+                t = s.get("totals", {})
+                points.append({
+                    "timestamp": s.get("timestamp"),
+                    "database": s.get("database"),
+                    "documents": t.get("documents", 0),
+                    "forest_disk_mb": t.get("forest_disk_mb", 0),
+                    "host_forest_mb": t.get("host_forest_mb", 0),
+                    "host_rss_mb": t.get("host_rss_mb", 0),
+                    "active_fragments": t.get("active_fragments", 0),
+                    "system_total_mb": t.get("system_total_mb", 0),
+                    "host_cache_mb": t.get("host_cache_mb", 0),
+                    "host_base_mb": t.get("host_base_mb", 0),
+                })
+            self._respond(200, "application/json",
+                          json.dumps(points, indent=2, default=str))
+
+        def _serve_ui(self):
+            self._respond(200, "text/html", _WEB_UI_HTML)
+
+        def _respond(self, code, content_type, body):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body.encode() if isinstance(body, str) else body)
+
+    # Initial collection
+    print(f"\n  MLCA Service starting on port {port}")
+    print(f"  Monitoring: {', '.join(databases)}")
+    print(f"  Collection interval: {interval_sec}s")
+    print(f"  Endpoints:")
+    print(f"    http://localhost:{port}/          Web UI")
+    print(f"    http://localhost:{port}/metrics   Prometheus metrics")
+    print(f"    http://localhost:{port}/api/      JSON API")
+    print(f"    http://localhost:{port}/health    Health check")
+    if otlp_endpoint:
+        print(f"  OTLP push: {otlp_endpoint}")
+    print()
+
+    collect_all()
+
+    # Start background collector
+    collector = threading.Thread(target=schedule_loop, daemon=True)
+    collector.start()
+
+    # Start HTTP server
+    server = HTTPServer(("", port), MLCAHandler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  MLCA Service stopped.")
+        server.shutdown()
+
+
+def push_otlp(snap, endpoint):
+    """Push metrics to an OpenTelemetry Collector via OTLP HTTP JSON.
+
+    Uses stdlib only — no opentelemetry-sdk required. Sends a minimal
+    OTLP JSON payload with gauge data points.
+    """
+    from urllib.request import Request, urlopen
+
+    t = snap.get("totals", {})
+    db = snap.get("database", "unknown")
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+
+    def dp(name, value, unit=""):
+        return {
+            "name": name,
+            "unit": unit,
+            "gauge": {
+                "dataPoints": [{
+                    "asDouble": float(value) if value else 0,
+                    "timeUnixNano": str(now_ns),
+                    "attributes": [
+                        {"key": "database", "value": {"stringValue": db}}
+                    ],
+                }]
+            }
+        }
+
+    metrics = [
+        dp("mlca.documents.total", t.get("documents", 0)),
+        dp("mlca.memory.forest", t.get("host_forest_mb", 0), "MB"),
+        dp("mlca.memory.rss", t.get("host_rss_mb", 0), "MB"),
+        dp("mlca.memory.headroom", t.get("system_total_mb", 0) * 0.8 -
+           t.get("host_cache_mb", 0) - t.get("host_base_mb", 0) -
+           t.get("host_file_mb", 0) - t.get("host_forest_mb", 0), "MB"),
+        dp("mlca.disk.used", t.get("forest_disk_mb", 0), "MB"),
+        dp("mlca.fragments.active", t.get("active_fragments", 0)),
+        dp("mlca.fragments.deleted", t.get("deleted_fragments", 0)),
+    ]
+
+    payload = {
+        "resourceMetrics": [{
+            "resource": {
+                "attributes": [
+                    {"key": "service.name", "value": {"stringValue": "mlca"}},
+                ]
+            },
+            "scopeMetrics": [{
+                "scope": {"name": "mlca"},
+                "metrics": metrics,
+            }]
+        }]
+    }
+
+    body = json.dumps(payload).encode()
+    url = endpoint.rstrip("/")
+    if not url.endswith("/v1/metrics"):
+        url += "/v1/metrics"
+    req = Request(url, data=body, method="POST",
+                  headers={"Content-Type": "application/json"})
+    with urlopen(req, timeout=10) as resp:
+        return resp.status
+
+
+# ── Web UI HTML ────────────────────────────────────────────────────
+
+_WEB_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLCA — MarkLogic Capacity Analysis</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: 'SF Mono', 'Consolas', monospace; font-size: 14px; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+h1 { color: #58a6ff; font-size: 20px; margin-bottom: 4px; }
+h2 { color: #8b949e; font-size: 14px; margin-bottom: 20px; font-weight: normal; }
+h3 { color: #58a6ff; font-size: 16px; margin: 24px 0 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+
+.hero { display: flex; gap: 20px; margin-bottom: 24px; }
+.hero-card { flex: 1; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; text-align: center; }
+.hero-card.warn { border-color: #d29922; }
+.hero-card.crit { border-color: #f85149; }
+.hero-value { font-size: 36px; font-weight: bold; color: #58a6ff; }
+.hero-card.warn .hero-value { color: #d29922; }
+.hero-card.crit .hero-value { color: #f85149; }
+.hero-label { color: #8b949e; font-size: 12px; margin-top: 4px; }
+
+.bar-container { background: #21262d; border-radius: 4px; height: 20px; margin: 4px 0; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+.bar-fill.green { background: #3fb950; }
+.bar-fill.yellow { background: #d29922; }
+.bar-fill.red { background: #f85149; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 16px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.card-title { color: #58a6ff; font-size: 13px; margin-bottom: 8px; }
+
+.metric { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; }
+.metric:last-child { border-bottom: none; }
+.metric-key { color: #8b949e; }
+.metric-val { color: #c9d1d9; font-weight: bold; }
+.metric-val.good { color: #3fb950; }
+.metric-val.warn { color: #d29922; }
+.metric-val.crit { color: #f85149; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: #58a6ff; border-bottom: 1px solid #30363d; padding: 6px 8px; }
+td { padding: 6px 8px; border-bottom: 1px solid #21262d; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.footer { margin-top: 24px; color: #484f58; font-size: 12px; text-align: center; }
+.loading { color: #8b949e; text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MLCA — MarkLogic Capacity Analysis</h1>
+  <h2 id="subtitle">Loading...</h2>
+
+  <div class="hero" id="hero"></div>
+
+  <div class="grid" id="grid"></div>
+
+  <h3>Index Memory Usage</h3>
+  <div class="card" id="indexes"><div class="loading">Loading...</div></div>
+
+  <div class="footer">MLCA &mdash; refreshes every 30s</div>
+</div>
+
+<script>
+function fmt(mb) {
+  if (mb == null) return 'N/A';
+  mb = Number(mb);
+  if (mb >= 1024) return (mb/1024).toFixed(2) + ' GB';
+  return mb.toFixed(1) + ' MB';
+}
+function pct(a, b) { return b > 0 ? (a/b*100).toFixed(1) : '0'; }
+function barClass(p) { return p >= 90 ? 'red' : p >= 70 ? 'yellow' : 'green'; }
+function heroClass(days) { return days < 30 ? 'crit' : days < 90 ? 'warn' : ''; }
+
+function renderBar(pctVal) {
+  return '<div class="bar-container"><div class="bar-fill ' + barClass(pctVal) +
+         '" style="width:' + Math.min(100, pctVal) + '%"></div></div>';
+}
+
+function metric(key, val, cls) {
+  return '<div class="metric"><span class="metric-key">' + key +
+         '</span><span class="metric-val' + (cls ? ' '+cls : '') + '">' + val + '</span></div>';
+}
+
+async function refresh() {
+  try {
+    const snap = await (await fetch('/api/snapshot')).json();
+    const t = snap.totals || {};
+    const db = snap.database || '?';
+    const ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
+
+    document.getElementById('subtitle').textContent = db + ' \u2014 ' + ts;
+
+    // Compute memory runway
+    const sysTot = t.system_total_mb || 0;
+    const cache = t.host_cache_mb || 0;
+    const base = t.host_base_mb || 0;
+    const file = t.host_file_mb || 0;
+    const forest = t.host_forest_mb || 0;
+    const fixed = cache + base + file;
+    const ceiling = sysTot * 0.8;
+    const headroom = ceiling - fixed - forest;
+    const memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
+
+    // Hero cards
+    let heroHTML = '';
+    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+                (t.documents||0).toLocaleString() + '</div><div class="hero-label">Documents</div></div>';
+    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+                fmt(forest) + '</div><div class="hero-label">Forest Memory</div></div>';
+    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+                fmt(headroom) + '</div><div class="hero-label">Memory Headroom</div></div>';
+    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+                memPct.toFixed(1) + '%</div><div class="hero-label">Memory Ceiling</div>' +
+                renderBar(memPct) + '</div>';
+    document.getElementById('hero').innerHTML = heroHTML;
+
+    // Grid cards
+    let grid = '';
+
+    // Memory breakdown
+    grid += '<div class="card"><div class="card-title">Memory Breakdown</div>' +
+      metric('Cache (list+tree)', fmt(cache)) +
+      metric('Forest stands', fmt(forest)) +
+      metric('Base ML overhead', fmt(base)) +
+      metric('File cache', fmt(file)) +
+      metric('Fixed total', fmt(fixed)) +
+      metric('Ceiling (80% RAM)', fmt(ceiling)) +
+      metric('Headroom', fmt(headroom), headroom < 1024 ? 'warn' : 'good') +
+    '</div>';
+
+    // Host
+    const hosts = snap.hosts || [];
+    if (hosts.length > 0) {
+      const h = hosts[0];
+      const rss = h['memory-process-rss-mb'] || 0;
+      const swap = h['memory-process-swap-mb'] || 0;
+      grid += '<div class="card"><div class="card-title">Host: ' + (h.hostname||'?') + '</div>' +
+        metric('System RAM', fmt(h['memory-system-total-mb'])) +
+        metric('ML RSS', fmt(rss)) +
+        metric('RSS peak', fmt(h['memory-process-rss-hwm-mb'])) +
+        metric('Swap', fmt(swap), swap > 0 ? 'crit' : 'good') +
+        metric('Page-out rate', (h['memory-system-pageout-rate']||0).toFixed(1) + ' MB/s') +
+      '</div>';
+    }
+
+    // Disk
+    const dbStat = snap.database_status || {};
+    const diskUsed = t.forest_disk_mb || 0;
+    const diskRemaining = Number(dbStat.least_remaining_mb || 0);
+    const diskTotal = diskUsed + diskRemaining;
+    const diskPct = diskTotal > 0 ? (diskUsed / diskTotal * 100) : 0;
+    grid += '<div class="card"><div class="card-title">Disk</div>' +
+      metric('Data on disk', fmt(diskUsed)) +
+      metric('Remaining', fmt(diskRemaining)) +
+      metric('Utilization', diskPct.toFixed(1) + '%') + renderBar(diskPct) +
+      (t.documents > 0 ? metric('Bytes/doc', Math.round(diskUsed*1048576/t.documents).toLocaleString()) : '') +
+    '</div>';
+
+    // Fragments
+    const active = t.active_fragments || 0;
+    const deleted = t.deleted_fragments || 0;
+    const fragTotal = active + deleted;
+    const fragPct = fragTotal > 0 ? (deleted/fragTotal*100) : 0;
+    grid += '<div class="card"><div class="card-title">Fragments</div>' +
+      metric('Active', active.toLocaleString()) +
+      metric('Deleted', deleted.toLocaleString(), deleted > 0 ? 'warn' : '') +
+      metric('Fragmentation', fragPct.toFixed(1) + '%', fragPct > 25 ? 'crit' : fragPct > 10 ? 'warn' : 'good') +
+      (fragPct >= 25 ? renderBar(fragPct) : '') +
+    '</div>';
+
+    document.getElementById('grid').innerHTML = grid;
+
+    // Index table
+    const im = snap.index_memory || {};
+    const indexes = (im.indexes || []).filter(i => (i.totalMemoryBytes||0) > 0 || (i.totalOnDiskBytes||0) > 0);
+    if (indexes.length > 0) {
+      indexes.sort((a,b) => (b.totalMemoryBytes||0) - (a.totalMemoryBytes||0));
+      let tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
+      indexes.forEach(i => {
+        const name = i.localname || i.pathExpression || i.indexType || '?';
+        const mem = i.totalMemoryBytes || 0;
+        const disk = i.totalOnDiskBytes || 0;
+        tbl += '<tr><td>' + name + '</td><td>' + (i.scalarType||i.indexType||'') +
+               '</td><td class="num">' + fmt(mem/1048576) +
+               '</td><td class="num">' + fmt(disk/1048576) + '</td></tr>';
+      });
+      tbl += '</table>';
+      document.getElementById('indexes').innerHTML = tbl;
+    } else {
+      document.getElementById('indexes').innerHTML = '<div class="loading">No index memory data available</div>';
+    }
+
+  } catch(e) {
+    document.getElementById('subtitle').textContent = 'Error: ' + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
+"""
+
+
 # ── Main ────────────────────────────────────────────────────────────
 
 def main():
@@ -2193,6 +2816,18 @@ def main():
     parser.add_argument("--project-docs", type=int, metavar="N", default=None,
                         help="Project index costs at N documents (use with --index-impact)")
 
+    # Service mode
+    parser.add_argument("--serve", action="store_true",
+                        help="Run as persistent service with /metrics, web UI, and JSON API")
+    parser.add_argument("--serve-port", type=int, default=9090,
+                        help="HTTP port for service mode (default: 9090)")
+    parser.add_argument("--interval", default="15m",
+                        help="Collection interval for service mode: 5m, 15m, 1h (default: 15m)")
+    parser.add_argument("--format", choices=["text", "prometheus", "json"], default="text",
+                        help="Output format: text (default), prometheus, json")
+    parser.add_argument("--otlp-endpoint", default=None, metavar="URL",
+                        help="Push metrics via OTLP HTTP (e.g. http://collector:4318)")
+
     args = parser.parse_args()
 
     # ── Snapshot listing (no connection needed) ──────────────────────
@@ -2205,6 +2840,25 @@ def main():
         args.password = getpass.getpass(f"Password for {args.user}@{args.host}: ")
 
     client = MarkLogicClient(args.host, args.port, args.user, args.password, args.auth_type)
+
+    # ── Service mode ─────────────────────────────────────────────
+    if args.serve:
+        databases = [args.database]
+        interval_sec = parse_interval(args.interval)
+        run_service(client, databases, interval_sec, args.serve_port,
+                    otlp_endpoint=args.otlp_endpoint)
+        sys.exit(0)
+
+    # ── One-shot format modes ────────────────────────────────────
+    if args.format in ("prometheus", "json"):
+        snap = collect_snapshot(client, args.database)
+        if not args.no_snapshot:
+            save_snapshot(snap)
+        if args.format == "prometheus":
+            print(snapshot_to_prometheus(snap))
+        else:
+            print(json.dumps(snap, indent=2, default=str))
+        sys.exit(0)
 
     print(color("""
     ╔══════════════════════════════════════════════════════╗

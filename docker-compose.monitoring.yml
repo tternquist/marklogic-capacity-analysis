@@ -1,0 +1,86 @@
+# MLCA Monitoring Stack
+#
+# Full stack: MarkLogic + MLCA service + Prometheus + Grafana
+#
+# Usage:
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# Access:
+#   Grafana:    http://localhost:3000  (admin/admin)
+#   MLCA UI:    http://localhost:9090
+#   Prometheus: http://localhost:9091
+#   ML Admin:   http://localhost:8001
+
+services:
+  marklogic:
+    image: progressofficial/marklogic-db:latest
+    container_name: mlca-marklogic
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    environment:
+      MARKLOGIC_INIT: "true"
+      MARKLOGIC_ADMIN_USERNAME: "admin"
+      MARKLOGIC_ADMIN_PASSWORD: "admin"
+      MARKLOGIC_WALLET_PASSWORD: "admin"
+    volumes:
+      - ml_data:/var/opt/MarkLogic
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/admin/v1/timestamp"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  mlca:
+    build: .
+    container_name: mlca-service
+    ports:
+      - "9090:9090"
+    environment:
+      MLCA_HOST: marklogic
+      MLCA_PORT: "8002"
+      MLCA_USER: admin
+      MLCA_PASSWORD: admin
+      MLCA_AUTH_TYPE: digest
+      MLCA_DATABASE: Documents
+      MLCA_INTERVAL: 1m
+      MLCA_SERVE_PORT: "9090"
+    depends_on:
+      marklogic:
+        condition: service_healthy
+    volumes:
+      - mlca_data:/data/.ml-capacity
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mlca-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prom_data:/prometheus
+    depends_on:
+      - mlca
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mlca-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./monitoring/grafana/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  ml_data:
+  mlca_data:
+  prom_data:
+  grafana_data:
