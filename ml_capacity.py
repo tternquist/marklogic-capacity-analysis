@@ -29,14 +29,33 @@ Usage:
 import argparse
 import getpass
 import json
+import logging
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from base64 import b64encode
+
+log = logging.getLogger("mlca")
+
+# ── Input validation ───────────────────────────────────────────────
+
+_SAFE_DB_NAME = re.compile(r'^[A-Za-z0-9_\-]+$')
+
+HTTP_TIMEOUT = 30  # seconds — applied to all urlopen() calls
+
+
+def validate_database_name(name):
+    """Reject database names that contain characters unsafe for XQuery interpolation."""
+    if not _SAFE_DB_NAME.match(name):
+        raise ValueError(
+            f"Invalid database name '{name}': "
+            "only alphanumeric characters, hyphens, and underscores are allowed"
+        )
 
 
 # ── Build info ──────────────────────────────────────────────────────
@@ -129,13 +148,13 @@ class MarkLogicClient:
         if self.auth_type == "basic":
             headers["Authorization"] = self._basic_auth_header()
             req = Request(url, headers=headers)
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read())
 
         # Digest auth
         try:
             req = Request(url, headers=headers)
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read())
         except HTTPError as e:
             if e.code != 401:
@@ -146,7 +165,7 @@ class MarkLogicClient:
             digest_resp = self._digest_response(auth_header, "GET", path)
             headers["Authorization"] = digest_resp
             req = Request(url, headers=headers)
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read())
 
     def _digest_response(self, www_auth, method, uri):
@@ -211,7 +230,7 @@ class MarkLogicClient:
         # First attempt (may need digest challenge)
         try:
             req = Request(url, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return self._parse_eval_response(resp.read().decode())
         except HTTPError as e:
             if e.code != 401 or self.auth_type == "basic":
@@ -223,7 +242,7 @@ class MarkLogicClient:
                 auth_header, "POST", path
             )
             req = Request(url, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return self._parse_eval_response(resp.read().decode())
 
     def eval_javascript(self, javascript, database=None, vars=None):
@@ -249,7 +268,7 @@ class MarkLogicClient:
 
         try:
             req = Request(self.base + path, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return self._parse_eval_response(resp.read().decode())
         except HTTPError as e:
             if e.code != 401 or self.auth_type == "basic":
@@ -261,7 +280,7 @@ class MarkLogicClient:
                 auth_header, "POST", path
             )
             req = Request(self.base + path, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return self._parse_eval_response(resp.read().decode())
 
     def put_json(self, path, data):
@@ -278,7 +297,7 @@ class MarkLogicClient:
 
         try:
             req = Request(url, data=body, headers=headers, method="PUT")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
         except HTTPError as e:
             if e.code != 401 or self.auth_type == "basic":
@@ -290,7 +309,7 @@ class MarkLogicClient:
                 auth_header, "PUT", path
             )
             req = Request(url, data=body, headers=headers, method="PUT")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
 
     def post_json(self, path, data=None):
@@ -307,7 +326,7 @@ class MarkLogicClient:
 
         try:
             req = Request(url, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
         except HTTPError as e:
             if e.code not in (401,) or self.auth_type == "basic":
@@ -319,7 +338,7 @@ class MarkLogicClient:
                 auth_header, "POST", path
             )
             req = Request(url, data=body, headers=headers, method="POST")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
 
     def delete_resource(self, path):
@@ -332,7 +351,7 @@ class MarkLogicClient:
 
         try:
             req = Request(url, headers=headers, method="DELETE")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
         except HTTPError as e:
             if e.code != 401 or self.auth_type == "basic":
@@ -344,7 +363,7 @@ class MarkLogicClient:
                 auth_header, "DELETE", path
             )
             req = Request(url, headers=headers, method="DELETE")
-            with urlopen(req) as resp:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status
 
     def _parse_eval_response(self, text):
@@ -480,6 +499,7 @@ def collect_forest_counts(client, database):
     or declare a default namespace. Using local-name() matching is the
     safest portable approach.
     """
+    validate_database_name(database)
     xquery = f"""
     let $db := xdmp:database("{database}")
     let $forests := xdmp:database-forests($db)
@@ -1675,7 +1695,8 @@ def collect_snapshot(client, database):
             snap["hosts"] = raw
         else:
             snap["hosts"] = []
-    except Exception:
+    except Exception as e:
+        log.warning("Host memory collection failed (requires ML_ALLOW_EVAL=true): %s", e)
         snap["hosts"] = []
 
     # Database status
@@ -1701,7 +1722,8 @@ def collect_snapshot(client, database):
             snap["forests"] = forests
         else:
             snap["forests"] = []
-    except Exception:
+    except Exception as e:
+        log.warning("Forest counts collection failed: %s", e)
         snap["forests"] = []
 
     # Database properties (for index config)
@@ -1742,7 +1764,8 @@ def collect_snapshot(client, database):
             snap["index_memory"] = idx_results[0]
         else:
             snap["index_memory"] = None
-    except Exception:
+    except Exception as e:
+        log.warning("Index memory collection failed (requires ML 11+): %s", e)
         snap["index_memory"] = None
 
     # Derived totals for easy trending
@@ -2479,8 +2502,8 @@ def snapshot_to_prometheus(snap):
               "Least remaining disk space on any forest in MB",
               float(remaining), db_labels)
 
-    docs = t.get("documents", 0)
-    disk = t.get("forest_disk_mb", 0)
+    docs = t.get("documents") or 0
+    disk = t.get("forest_disk_mb") or 0
     if docs > 0 and disk > 0:
         gauge("mlca_disk_bytes_per_doc",
               "Disk bytes per document",
@@ -2539,7 +2562,7 @@ def parse_interval(s):
 
 
 def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
-                retention_days=30):
+                retention_days=30, api_token=None):
     """Run MLCA as a persistent service with HTTP endpoints.
 
     Collects snapshots on schedule, serves /metrics, /api/*, and web UI.
@@ -2559,12 +2582,11 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 save_snapshot(snap)
                 with lock:
                     latest_snapshots[db] = snap
-                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-                      f"Collected {db}: {snap['totals']['documents']:,} docs, "
-                      f"forest={fmt_mb(snap['totals']['host_forest_mb'])}")
+                log.info("Collected %s: %s docs, forest=%s",
+                         db, f"{snap['totals']['documents']:,}",
+                         fmt_mb(snap['totals']['host_forest_mb']))
             except Exception as e:
-                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-                      f"Error collecting {db}: {e}")
+                log.error("Error collecting %s: %s", db, e)
 
     def schedule_loop():
         """Run collection on a repeating interval."""
@@ -2573,9 +2595,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
             # Prune old snapshots
             removed = prune_snapshots(retention_days)
             if removed:
-                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-                      f"Pruned {removed} snapshot(s) older than "
-                      f"{retention_days} days")
+                log.info("Pruned %d snapshot(s) older than %d days",
+                         removed, retention_days)
             # Push to OTLP if configured
             if otlp_endpoint:
                 with lock:
@@ -2583,12 +2604,45 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                         try:
                             push_otlp(snap, otlp_endpoint)
                         except Exception as e:
-                            print(f"  OTLP push error: {e}")
+                            log.error("OTLP push error: %s", e)
             threading.Event().wait(interval_sec)
 
     class MLCAHandler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
-            pass  # suppress default access logs
+            log.info("HTTP %s", format % args)
+
+        def _check_auth(self):
+            """Return True if request is authorized, False otherwise."""
+            if not api_token:
+                return True
+            # /health is always accessible (for load balancers / probes)
+            path, _ = self._parse_request()
+            if path == "/health":
+                return True
+            auth = self.headers.get("Authorization", "")
+            if auth == f"Bearer {api_token}":
+                return True
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":"Unauthorized - provide Authorization: Bearer <token>"}')
+            return False
+
+        def _add_cors_headers(self):
+            """Add CORS headers — restricted to same-origin when no token configured."""
+            origin = self.headers.get("Origin", "")
+            if api_token:
+                # When auth is enabled, allow the requesting origin (token provides security)
+                if origin:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+            else:
+                # No auth — only allow same-origin (no CORS header = browser blocks cross-origin)
+                pass
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers",
+                             "Content-Type, Authorization")
 
         def _parse_request(self):
             """Parse URL into path and query params."""
@@ -2603,6 +2657,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
             return vals[0] if vals else None
 
         def do_GET(self):
+            if not self._check_auth():
+                return
             path, params = self._parse_request()
             db_filter = self._get_db_filter(params)
 
@@ -2630,6 +2686,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 self._respond(404, "text/plain", "Not Found")
 
         def do_POST(self):
+            if not self._check_auth():
+                return
             path, params = self._parse_request()
             if path == "/api/snapshot":
                 self._handle_take_snapshot()
@@ -2637,6 +2695,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 self._respond(404, "text/plain", "Not Found")
 
         def do_DELETE(self):
+            if not self._check_auth():
+                return
             path, params = self._parse_request()
             if path.startswith("/api/snapshots/"):
                 filename = path[len("/api/snapshots/"):]
@@ -2647,10 +2707,7 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
         def do_OPTIONS(self):
             """Handle CORS preflight for DELETE/POST."""
             self.send_response(200)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods",
-                             "GET, POST, DELETE, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self._add_cors_headers()
             self.end_headers()
 
         def _serve_metrics(self):
@@ -2838,7 +2895,7 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
         def _respond(self, code, content_type, body):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._add_cors_headers()
             self.end_headers()
             self.wfile.write(body.encode() if isinstance(body, str) else body)
 
@@ -3776,8 +3833,24 @@ def main():
                         help="Output format: text (default), prometheus, json")
     parser.add_argument("--otlp-endpoint", default=None, metavar="URL",
                         help="Push metrics via OTLP HTTP (e.g. http://collector:4318)")
+    parser.add_argument("--api-token", default=None,
+                        help="Bearer token required for service API access (env: MLCA_API_TOKEN)")
 
     args = parser.parse_args()
+
+    # ── Configure logging ───────────────────────────────────────────
+    logging.basicConfig(
+        level=logging.INFO,
+        format="  [%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # ── Validate database name (prevents XQuery injection) ───────────
+    try:
+        validate_database_name(args.database)
+    except ValueError as e:
+        print(f"\n{color('ERROR', RED)}: {e}")
+        sys.exit(1)
 
     # ── Snapshot listing (no connection needed) ──────────────────────
     if args.snapshots:
@@ -3788,6 +3861,9 @@ def main():
     if not args.password:
         args.password = getpass.getpass(f"Password for {args.user}@{args.host}: ")
 
+    # Resolve API token from arg or environment
+    api_token = args.api_token or os.environ.get("MLCA_API_TOKEN")
+
     client = MarkLogicClient(args.host, args.port, args.user, args.password, args.auth_type)
 
     # ── Service mode ─────────────────────────────────────────────
@@ -3796,7 +3872,8 @@ def main():
         interval_sec = parse_interval(args.interval)
         run_service(client, databases, interval_sec, args.serve_port,
                     otlp_endpoint=args.otlp_endpoint,
-                    retention_days=args.retention_days)
+                    retention_days=args.retention_days,
+                    api_token=api_token)
         sys.exit(0)
 
     # ── One-shot format modes ────────────────────────────────────
