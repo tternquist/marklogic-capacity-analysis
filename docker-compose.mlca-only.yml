@@ -18,7 +18,7 @@
 
 services:
   mlca:
-    build: .
+    image: ghcr.io/tternquist/marklogic-capacity-analysis:main
     container_name: mlca-service
     ports:
       - "${MLCA_SERVE_PORT:-9090}:9090"

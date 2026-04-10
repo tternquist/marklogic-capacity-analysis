@@ -34,7 +34,7 @@ services:
       start_period: 60s
 
   mlca:
-    build: .
+    image: ghcr.io/tternquist/marklogic-capacity-analysis:main
     container_name: mlca-service
     ports:
       - "9090:9090"
