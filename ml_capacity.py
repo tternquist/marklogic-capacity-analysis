@@ -2593,6 +2593,17 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
 
         def _serve_json_databases(self):
             db_names = set(latest_snapshots.keys())
+            # Fetch all databases from the cluster
+            try:
+                results = client.eval_javascript(
+                    'Array.from(xdmp.databases()).map('
+                    'function(id){return xdmp.databaseName(id)})')
+                if results and isinstance(results[0], list):
+                    for name in results[0]:
+                        db_names.add(name)
+            except Exception:
+                pass  # fall back to local knowledge
+            # Also include databases from saved snapshots
             for s in load_snapshots():
                 db_name = s.get("database")
                 if db_name:
