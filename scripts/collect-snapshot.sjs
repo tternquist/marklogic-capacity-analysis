@@ -73,7 +73,7 @@ var hosts = [];
 var hostArr = hostIds.toArray();
 for (var i = 0; i < hostArr.length; i++) {
   var hostId = hostArr[i];
-  var s = xdmp.hostStatus(hostId);
+  var s = fn.head(xdmp.hostStatus(hostId));
   // Extract values via xpath on the status node
   var getVal = function(node, localName) {
     var seq = node.xpath("//*[local-name()='" + localName + "']/data(.)");
@@ -123,8 +123,8 @@ var mergeCount = 0;
 var forests = [];
 for (var fi = 0; fi < dbForests.length; fi++) {
   var fid = dbForests[fi];
-  var fc = xdmp.forestCounts(fid);
-  var fs = xdmp.forestStatus(fid);
+  var fc = fn.head(xdmp.forestCounts(fid));
+  var fs = fn.head(xdmp.forestStatus(fid));
 
   var getValFromNode = function(node, localName) {
     var seq = node.xpath("//*[local-name()='" + localName + "']/data(.)");
@@ -204,57 +204,52 @@ var databaseStatus = {
   "list_cache_ratio":   0
 };
 
-// ── 5. Database properties ───────────────────────────────────────────
-var dbProps = xdmp.databaseGet(db);
-var getDbProp = function(propName, defaultVal) {
-  try {
-    var seq = dbProps.xpath("//*[local-name()='" + propName + "']/data(.)");
-    var arr = seq.toArray();
-    if (arr.length > 0) {
-      var val = arr[0];
-      if (typeof defaultVal === "number") return Number(val);
-      if (typeof defaultVal === "boolean") return val === true || val === "true";
-      return val;
-    }
-  } catch (e) { /* ignore */ }
-  return defaultVal;
-};
+// ── 5. Database properties (via admin module) ────────────────────────
+var admin = require("/MarkLogic/admin.xqy");
+var config = admin.getConfiguration();
 
 var dbProperties = {
-  "in_memory_limit":              getDbProp("in-memory-limit", 32768),
-  "in_memory_list_size":          getDbProp("in-memory-list-size", 64),
-  "in_memory_tree_size":          getDbProp("in-memory-tree-size", 16),
-  "in_memory_range_index_size":   getDbProp("in-memory-range-index-size", 2),
-  "in_memory_reverse_index_size": getDbProp("in-memory-reverse-index-size", 2),
-  "in_memory_triple_index_size":  getDbProp("in-memory-triple-index-size", 16),
-  "preload_mapped_data":          getDbProp("preload-mapped-data", false)
+  "in_memory_limit":              Number(admin.databaseGetInMemoryLimit(config, db)),
+  "in_memory_list_size":          Number(admin.databaseGetInMemoryListSize(config, db)),
+  "in_memory_tree_size":          Number(admin.databaseGetInMemoryTreeSize(config, db)),
+  "in_memory_range_index_size":   Number(admin.databaseGetInMemoryRangeIndexSize(config, db)),
+  "in_memory_reverse_index_size": Number(admin.databaseGetInMemoryReverseIndexSize(config, db)),
+  "in_memory_triple_index_size":  Number(admin.databaseGetInMemoryTripleIndexSize(config, db)),
+  "preload_mapped_data":          xs.boolean(admin.databaseGetPreloadMappedData(config, db))
 };
 
 // ── 6. Index counts ──────────────────────────────────────────────────
-var countElements = function(localName) {
-  try {
-    var seq = dbProps.xpath("//*[local-name()='" + localName + "']");
-    return fn.count(seq);
-  } catch(e) { return 0; }
-};
+var rangeElementIndexes = admin.databaseGetRangeElementIndexes(config, db);
+var rangePathIndexes = [];
+try { rangePathIndexes = admin.databaseGetRangePathIndexes(config, db); } catch(e) {}
+var rangeFieldIndexes = [];
+try { rangeFieldIndexes = admin.databaseGetRangeFieldIndexes(config, db); } catch(e) {}
 
-var boolIndexNames = [
-  "word-searches", "fast-phrase-searches", "triple-index",
-  "fast-case-sensitive-searches", "fast-diacritic-sensitive-searches",
-  "fast-element-word-searches", "fast-element-phrase-searches",
-  "uri-lexicon", "collection-lexicon", "trailing-wildcard-searches",
-  "three-character-searches", "field-value-searches"
-];
+var boolChecks = {
+  "word-searches":                   function() { return admin.databaseGetWordSearches(config, db); },
+  "fast-phrase-searches":            function() { return admin.databaseGetFastPhraseSearches(config, db); },
+  "triple-index":                    function() { return admin.databaseGetTripleIndex(config, db); },
+  "fast-case-sensitive-searches":    function() { return admin.databaseGetFastCaseSensitiveSearches(config, db); },
+  "fast-diacritic-sensitive-searches": function() { return admin.databaseGetFastDiacriticSensitiveSearches(config, db); },
+  "fast-element-word-searches":      function() { return admin.databaseGetFastElementWordSearches(config, db); },
+  "fast-element-phrase-searches":    function() { return admin.databaseGetFastElementPhraseSearches(config, db); },
+  "uri-lexicon":                     function() { return admin.databaseGetUriLexicon(config, db); },
+  "collection-lexicon":              function() { return admin.databaseGetCollectionLexicon(config, db); },
+  "trailing-wildcard-searches":      function() { return admin.databaseGetTrailingWildcardSearches(config, db); },
+  "three-character-searches":        function() { return admin.databaseGetThreeCharacterSearches(config, db); }
+};
 var enabledBools = 0;
-for (var bi = 0; bi < boolIndexNames.length; bi++) {
-  var bval = getDbProp(boolIndexNames[bi], false);
-  if (bval === true || bval === "true") enabledBools++;
-}
+Object.keys(boolChecks).forEach(function(key) {
+  try {
+    var val = boolChecks[key]();
+    if (val === true || String(val) === "true") enabledBools++;
+  } catch(e) { /* function may not exist in older versions */ }
+});
 
 var indexCounts = {
-  "range_element": countElements("range-element-index"),
-  "range_path":    countElements("range-path-index"),
-  "range_field":   countElements("range-field-index"),
+  "range_element": fn.count(rangeElementIndexes),
+  "range_path":    fn.count(rangePathIndexes),
+  "range_field":   fn.count(rangeFieldIndexes),
   "enabled_boolean_indexes": enabledBools
 };
 
