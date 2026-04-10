@@ -1,0 +1,65 @@
+# MLCA Monitoring Stack (external MarkLogic)
+#
+# Connects to an existing MarkLogic cluster. Set MLCA_HOST to your
+# MarkLogic Management API hostname.
+#
+# Usage:
+#   MLCA_HOST=ml.example.com MLCA_PASSWORD=secret docker compose up -d
+#
+# Or edit the environment values below directly.
+#
+# Access:
+#   Grafana:    http://localhost:3000  (admin/admin)
+#   MLCA UI:    http://localhost:9090
+#   Prometheus: http://localhost:9091
+
+services:
+  mlca:
+    build: .
+    container_name: mlca-service
+    ports:
+      - "9090:9090"
+    environment:
+      MLCA_HOST: ${MLCA_HOST:-localhost}
+      MLCA_PORT: ${MLCA_PORT:-8002}
+      MLCA_USER: ${MLCA_USER:-admin}
+      MLCA_PASSWORD: ${MLCA_PASSWORD:-admin}
+      MLCA_AUTH_TYPE: ${MLCA_AUTH_TYPE:-digest}
+      MLCA_DATABASE: ${MLCA_DATABASE:-Documents}
+      MLCA_INTERVAL: ${MLCA_INTERVAL:-15m}
+      MLCA_SERVE_PORT: "9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - mlca_data:/data/.ml-capacity
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mlca-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prom_data:/prometheus
+    depends_on:
+      - mlca
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mlca-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./monitoring/grafana/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  mlca_data:
+  prom_data:
+  grafana_data:
