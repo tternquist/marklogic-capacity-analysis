@@ -2603,8 +2603,8 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
 
         def _serve_json_databases(self):
             _SYSTEM_DBS = {
-                "App-Services", "Extensions", "Last-Login", "Meters",
-                "Modules", "Schemas", "Security", "Triggers",
+                "App-Services", "Extensions", "Fab", "Last-Login",
+                "Meters", "Modules", "Schemas", "Security", "Triggers",
             }
             db_names = set(latest_snapshots.keys())
             # Fetch all databases from the cluster
