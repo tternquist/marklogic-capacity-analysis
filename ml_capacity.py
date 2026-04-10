@@ -2910,6 +2910,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .modal-body { padding: 16px; overflow-y: auto; flex: 1; }
 .modal-body pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.5; }
 
+.alert-banner { background: #3d1a1a; border: 1px solid #f85149; border-radius: 8px;
+  padding: 12px 16px; margin-bottom: 16px; color: #f85149; font-size: 13px;
+  display: flex; align-items: center; gap: 10px; }
+.alert-banner .alert-icon { font-size: 18px; flex-shrink: 0; }
+.alert-banner.warn { background: #2d2008; border-color: #d29922; color: #d29922; }
+
 .footer { margin-top: 24px; color: #484f58; font-size: 12px; text-align: center; }
 .loading { color: #8b949e; text-align: center; padding: 40px; }
 
@@ -2926,6 +2932,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <select id="dbSelect" class="db-select" title="Select database"></select>
   </div>
   <div id="subtitle">Loading...</div>
+
+  <div id="alert-banner" style="display:none" class="alert-banner">
+    <span class="alert-icon">&#9888;</span>
+    <span id="alert-text"></span>
+  </div>
 
   <div class="tabs">
     <button class="tab active" data-tab="dashboard">Dashboard</button>
@@ -3049,27 +3060,55 @@ async function refreshDashboard() {
     var headroom = ceiling - fixed - forest;
     var memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
 
+    // Severity helpers for hero cards
+    var memCard = memPct >= 90 ? 'crit' : memPct >= 70 ? 'warn' : '';
+    var headroomCard = headroom < 512 ? 'crit' : headroom < 1024 ? 'warn' : '';
+
     var heroHTML = '';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
                 fmtNum(t.documents) + '</div><div class="hero-label">Documents</div></div>';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
                 fmt(forest) + '</div><div class="hero-label">Forest Memory</div></div>';
-    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+    heroHTML += '<div class="hero-card ' + headroomCard + '"><div class="hero-value">' +
                 fmt(headroom) + '</div><div class="hero-label">Memory Headroom</div></div>';
-    heroHTML += '<div class="hero-card"><div class="hero-value">' +
+    heroHTML += '<div class="hero-card ' + memCard + '"><div class="hero-value">' +
                 memPct.toFixed(1) + '%</div><div class="hero-label">Memory Ceiling</div>' +
                 renderBar(memPct) + '</div>';
     document.getElementById('hero').innerHTML = heroHTML;
 
+    // Alert banner
+    var banner = document.getElementById('alert-banner');
+    var alertText = document.getElementById('alert-text');
+    if (headroom <= 0) {
+      banner.className = 'alert-banner';
+      alertText.textContent = 'CRITICAL: Memory ceiling exceeded — ' + db +
+        ' is using ' + memPct.toFixed(1) + '% of the 80% ML guardrail. Risk of OOM.';
+      banner.style.display = 'flex';
+    } else if (memPct >= 90) {
+      banner.className = 'alert-banner';
+      alertText.textContent = 'WARNING: Memory at ' + memPct.toFixed(1) + '% of ceiling — only ' +
+        fmt(headroom) + ' headroom remaining in ' + db + '.';
+      banner.style.display = 'flex';
+    } else if (memPct >= 70) {
+      banner.className = 'alert-banner warn';
+      alertText.textContent = 'Memory at ' + memPct.toFixed(1) + '% of ceiling — ' +
+        fmt(headroom) + ' headroom remaining.';
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+
     var grid = '';
+    // Identify dominant growth driver (base_mb typically grows fastest with data)
+    var baseNote = base > forest * 1.5 ? ' \u2605 primary driver' : '';
     grid += '<div class="card"><div class="card-title">Memory Breakdown</div>' +
       metric('Cache (list+tree)', fmt(cache)) +
       metric('Forest stands', fmt(forest)) +
-      metric('Base ML overhead', fmt(base)) +
+      metric('Base ML overhead' + baseNote, fmt(base), baseNote ? 'warn' : '') +
       metric('File cache', fmt(file)) +
       metric('Fixed total', fmt(fixed)) +
       metric('Ceiling (80% RAM)', fmt(ceiling)) +
-      metric('Headroom', fmt(headroom), headroom < 1024 ? 'warn' : 'good') +
+      metric('Headroom', fmt(headroom), headroom < 512 ? 'crit' : headroom < 1024 ? 'warn' : 'good') +
     '</div>';
 
     var hosts = snap.hosts || [];
@@ -3155,13 +3194,20 @@ async function refreshDashboard() {
     try {
       var trend = await (await fetch('/api/trend' + dbParam())).json();
       var projSec = document.getElementById('projections-section');
-      // Deduplicate trend points with same doc count (keep last)
-      var seen = {}; var dedupTrend = [];
-      trend.forEach(function(p) {
-        var key = p.documents;
-        if (seen[key] !== undefined) dedupTrend[seen[key]] = p;
-        else { seen[key] = dedupTrend.length; dedupTrend.push(p); }
-      });
+
+      // ── Improved dedup: for each run of identical doc counts, keep first
+      // and last snapshot. "First" captures the moment loading stopped;
+      // "last" captures the settled (post-merge) state. This preserves both
+      // the inflection point and the steady-state value for regression quality.
+      var dedupTrend = [];
+      var i = 0;
+      while (i < trend.length) {
+        var runStart = i;
+        while (i < trend.length && trend[i].documents === trend[runStart].documents) i++;
+        dedupTrend.push(trend[runStart]);
+        if (i - 1 > runStart) dedupTrend.push(trend[i - 1]);
+      }
+      var rawCount = trend.length;
       trend = dedupTrend;
 
       if (trend.length >= 3) {
@@ -3198,9 +3244,31 @@ async function refreshDashboard() {
           return (p.host_forest_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
         });
 
+        // ── Distinct doc levels (regression quality signal) ──
+        var distinctLevels = new Set(xDocs).size;
+
+        // ── Forest spike detection: exclude mid-merge snapshots from regression ──
+        // A merge spike occurs when forest_mb is substantially above the doc-level
+        // expectation. We detect it by comparing each point to the overall trend:
+        // sort forest values, use median as baseline, flag points > 1.5× median.
+        var sortedForest = yForest.slice().sort(function(a,b){return a-b;});
+        var medForest = sortedForest[Math.floor(sortedForest.length / 2)];
+        var spikeThreshold = medForest * 1.6;
+        var nonSpike = trend.filter(function(p) {
+          return (p.host_forest_mb||0) <= spikeThreshold;
+        });
+        var spikeCount = trend.length - nonSpike.length;
+        // Use spike-filtered set for regression if we still have enough points
+        var regPoints = nonSpike.length >= 3 ? nonSpike : trend;
+        var xDocsR = regPoints.map(function(p) { return p.documents; });
+        var yDiskR  = regPoints.map(function(p) { return p.forest_disk_mb; });
+        var yTotalMemR = regPoints.map(function(p) {
+          return (p.host_forest_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
+        });
+
         // Regression: docs as x-axis (stable, monotonic, independent of loading rate)
-        var diskReg = linReg(xDocs, yDisk);
-        var totalMemReg = linReg(xDocs, yTotalMem);
+        var diskReg = linReg(xDocsR, yDiskR);
+        var totalMemReg = linReg(xDocsR, yTotalMemR);
 
         // Marginal cost per doc from regression slope
         var marginalMemBytes = totalMemReg.slope * 1048576;  // MB/doc -> bytes/doc
@@ -3247,9 +3315,33 @@ async function refreshDashboard() {
             proj += metric('Time-based ETA', '<span style="color:#8b949e">Need &gt;12h of data</span>');
           }
 
-          proj += metric('Regression fit (R\u00b2)', '<span class="metric-val ' + memConfClass + '">' + memConfLabel + ' (' + memConfidence.toFixed(2) + ')</span>', '') +
-            metric('Snapshots', trend.length + ' over ' + (spanDays < 1 ? (spanDays*24).toFixed(1) + 'h' : spanDays.toFixed(1) + 'd')) +
-            '</div>';
+          proj += metric('Regression fit (R\u00b2)', '<span class="metric-val ' + memConfClass + '">' + memConfLabel + ' (' + memConfidence.toFixed(2) + ')</span>', '');
+          // Data quality indicators
+          var dataQuality = rawCount + ' snapshots \u2192 ' + trend.length + ' deduped, ' + distinctLevels + ' distinct doc level' + (distinctLevels !== 1 ? 's' : '');
+          if (spikeCount > 0) dataQuality += ', ' + spikeCount + ' merge spike' + (spikeCount !== 1 ? 's' : '') + ' excluded';
+          proj += metric('Data quality', '<span style="color:#8b949e">' + dataQuality + '</span>');
+          if (distinctLevels < 3) {
+            proj += '<div style="color:#d29922;font-size:11px;padding:4px 0">Low distinct doc levels — add more snapshots across different doc counts for better regression quality.</div>';
+          }
+          proj += metric('Window', spanDays < 1 ? (spanDays*24).toFixed(1) + 'h' : spanDays.toFixed(1) + 'd') + '</div>';
+
+          // ── Model accuracy: track projected ceiling vs reality ──
+          var projKey = 'mlca_proj_' + (selectedDb || 'Documents');
+          var projCeiling = last.documents + docsUntilCeiling;
+          // If we are past a previously stored ceiling, show accuracy
+          var storedProj = null;
+          try { storedProj = JSON.parse(localStorage.getItem(projKey)); } catch(e) {}
+          if (storedProj && storedProj.ceiling && last.documents >= storedProj.ceiling) {
+            var overBy = last.documents - storedProj.ceiling;
+            var pctOff = Math.abs(overBy / storedProj.ceiling * 100);
+            proj += '<div class="card" style="border-color:#3fb950"><div class="card-title">Model Accuracy</div>' +
+              metric('Projected ceiling', fmtNum(storedProj.ceiling) + ' docs') +
+              metric('Actual at ceiling', fmtNum(last.documents) + ' docs') +
+              metric('Error', (overBy >= 0 ? '+' : '') + fmtNum(overBy) + ' (' + pctOff.toFixed(1) + '% ' + (overBy >= 0 ? 'optimistic' : 'pessimistic') + ')') +
+              '</div>';
+          }
+          // Always persist current projection for future comparison
+          localStorage.setItem(projKey, JSON.stringify({ ceiling: projCeiling, ts: Date.now() }));
         }
 
         // ── Disk capacity ──
