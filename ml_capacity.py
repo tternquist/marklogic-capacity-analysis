@@ -618,7 +618,29 @@ def report_forest_health(client, database):
 
             total_frags = active + deleted
             frag_pct = (deleted / total_frags * 100) if total_frags > 0 else 0
-            kv("Fragmentation", f"{frag_pct:.1f}%  {status_badge(frag_pct < 20, 'OK', 'HIGH')}")
+
+            if frag_pct >= 50:
+                frag_badge = color("[CRITICAL]", RED + BOLD)
+            elif frag_pct >= 25:
+                frag_badge = color("[HIGH]", RED)
+            elif frag_pct >= 10:
+                frag_badge = color("[MODERATE]", YELLOW)
+            else:
+                frag_badge = color("[OK]", GREEN)
+            kv("Fragmentation", f"{frag_pct:.1f}%  ({deleted:,} deleted / {total_frags:,} total)  {frag_badge}")
+
+            if frag_pct >= 25:
+                # Estimate wasted space
+                if total_frags > 0 and disk > 0:
+                    wasted_mb = disk * (deleted / total_frags)
+                    print(f"      {color('!', RED)} ~{fmt_mb(wasted_mb)} of disk occupied by deleted fragments")
+                if frag_pct >= 50:
+                    print(f"      {color('!', RED)} {color('Merge recommended to reclaim space and improve projection accuracy', BOLD)}")
+                    print(f"      {color('  Run:', DIM)} xdmp:merge(xdmp:database-forests(xdmp:database(\"{name}\")))")
+                    print(f"      {color('  Or via Admin UI: Database > Merge > Merge Now', DIM)}")
+                else:
+                    print(f"      {color('!', YELLOW)} High deleted fragment ratio inflates disk and memory metrics")
+                    print(f"      {color('  Consider forcing a merge if projections seem off', DIM)}")
 
             kv("Stands", f"{stands} / 64 max  {bar(stands / 64 * 100, 50, 75)}")
             kv("Disk size", fmt_mb(disk))
@@ -931,9 +953,12 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
     # Gather current totals
     total_docs = sum(f.get("document-count", 0) or 0 for f in forest_data)
     total_active = sum(f.get("active-fragment-count", 0) or 0 for f in forest_data)
+    total_deleted = sum(f.get("deleted-fragment-count", 0) or 0 for f in forest_data)
     total_memory = sum(f.get("memory-size-mb", 0) or 0 for f in forest_data)
     total_disk = sum(f.get("disk-size-mb", 0) or 0 for f in forest_data)
     num_forests = len(forest_data)
+    total_frags = total_active + total_deleted
+    frag_pct = (total_deleted / total_frags * 100) if total_frags > 0 else 0
 
     # In-memory settings from db properties
     in_mem_limit_kb = db_props.get("in-memory-limit", 131072)  # default 128 MB in KB
@@ -1068,21 +1093,51 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
            f"{fmt_mb(forest_headroom)}  {status_badge(forest_headroom > 512, 'OK', 'LOW')}",
            indent=6)
 
+        # ── Fragmentation warning ──────────────────────────────────────
+        if frag_pct >= 25:
+            print()
+            if frag_pct >= 50:
+                print(f"    {color('!' * 3, RED)} {color(f'FRAGMENTATION: {frag_pct:.0f}% deleted fragments', RED + BOLD)}")
+                print(f"    {color('!' * 3, RED)} {color('Disk and memory metrics are significantly inflated.', RED)}")
+                print(f"    {color('!' * 3, RED)} {color('Capacity projections below are UNRELIABLE until a merge completes.', RED + BOLD)}")
+                print(f"    {color('!' * 3, RED)} {color('Force a merge, then re-run this report for accurate projections.', RED)}")
+            else:
+                print(f"    {color('!', YELLOW)} {color(f'Fragmentation: {frag_pct:.0f}% deleted fragments', YELLOW + BOLD)}")
+                print(f"    {color('  Disk metrics may be inflated. Consider a merge for more accurate projections.', DIM)}")
+
         # Primary: disk-based projection
         if total_docs > 0 and total_disk > 0:
             disk_bytes_per_doc = (total_disk * 1024 * 1024) / total_docs
+
+            # If fragmentation is high, estimate the "clean" bytes/doc
+            if frag_pct >= 25 and total_frags > 0:
+                clean_ratio = total_active / total_frags
+                estimated_clean_disk = total_disk * clean_ratio
+                clean_bytes_per_doc = (estimated_clean_disk * 1024 * 1024) / total_docs
+            else:
+                clean_bytes_per_doc = None
 
             print()
             print(f"    {color('Disk capacity (primary — most reliable)', BOLD)}")
             kv("  Current disk size",  fmt_mb(total_disk), indent=6)
             kv("  Disk bytes/doc",     f"{disk_bytes_per_doc:,.0f}", indent=6)
 
+            if clean_bytes_per_doc is not None:
+                kv("  Est. bytes/doc after merge",
+                   f"{color(f'{clean_bytes_per_doc:,.0f}', BOLD)}  "
+                   f"{color(f'(~{frag_pct:.0f}% of current disk is deleted fragments)', DIM)}",
+                   indent=6)
+
             if remaining_disk_mb > 0:
-                disk_docs_remaining = int((remaining_disk_mb * 1024 * 1024) / disk_bytes_per_doc)
+                # Use clean estimate if fragmentation is high
+                proj_bpd = clean_bytes_per_doc if clean_bytes_per_doc else disk_bytes_per_doc
+                disk_docs_remaining = int((remaining_disk_mb * 1024 * 1024) / proj_bpd)
                 disk_total = total_docs + disk_docs_remaining
                 kv("  Disk remaining",     fmt_mb(remaining_disk_mb), indent=6)
                 kv("  Est. additional documents until disk full",
-                   f"{color(f'{disk_docs_remaining:,}', BOLD)}", indent=6)
+                   f"{color(f'{disk_docs_remaining:,}', BOLD)}"
+                   + (f"  {color('(adjusted for fragmentation)', DIM)}" if clean_bytes_per_doc else ""),
+                   indent=6)
                 kv("  Est. total documents at disk full",
                    f"{disk_total:,}", indent=6)
 
@@ -1131,8 +1186,17 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
             issues.append(("Merge pressure", f"Forest '{f.get('forest-name')}' has {stands}/64 stands"))
         deleted = f.get("deleted-fragment-count", 0) or 0
         active = f.get("active-fragment-count", 0) or 0
-        if active > 0 and (deleted / (active + deleted)) > 0.25:
-            issues.append(("High fragmentation", f"Forest '{f.get('forest-name')}' at {deleted/(active+deleted)*100:.0f}% deleted fragments"))
+        if active > 0 and deleted > 0:
+            f_ratio = deleted / (active + deleted)
+            f_name = f.get("forest-name", "?")
+            if f_ratio > 0.50:
+                issues.append(("Force merge needed",
+                    f"Forest '{f_name}' at {f_ratio*100:.0f}% deleted fragments — "
+                    f"projections unreliable, run: xdmp:merge(xdmp:database-forests(xdmp:database(\"{f_name}\")))"))
+            elif f_ratio > 0.25:
+                issues.append(("High fragmentation",
+                    f"Forest '{f_name}' at {f_ratio*100:.0f}% deleted fragments — "
+                    f"consider forcing a merge to reclaim space"))
 
     if host_data:
         total_sys = sum(h.get("memory-system-total-mb", 0) for h in host_data)
