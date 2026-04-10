@@ -30,6 +30,27 @@ class TestParseInterval:
     def test_case_insensitive(self):
         assert mc.parse_interval("5M") == 300
 
+    def test_invalid_suffix_raises(self):
+        with pytest.raises(ValueError):
+            mc.parse_interval("10x")
+
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError):
+            mc.parse_interval("")
+
+    def test_only_suffix_raises(self):
+        with pytest.raises(ValueError):
+            mc.parse_interval("m")
+
+    def test_large_value(self):
+        assert mc.parse_interval("24h") == 86400
+
+    def test_one_second(self):
+        assert mc.parse_interval("1s") == 1
+
+    def test_zero(self):
+        assert mc.parse_interval("0") == 0
+
 
 class TestValidateDatabaseName:
     def test_valid_simple(self):
