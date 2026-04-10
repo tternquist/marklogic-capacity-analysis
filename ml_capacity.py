@@ -9,19 +9,31 @@ and provides capacity analysis including:
   - Forest health (stands, fragmentation, merge status)
   - Disk utilization and runway
   - Index configuration summary
+  - Per-index memory usage (ML 11+)
   - Document capacity estimation (how many more docs before memory limits)
+  - Snapshot persistence and trend analysis over time
+
+Snapshots:
+  Every run saves a snapshot to .ml-capacity/ (next to this script).
+  Use --trend to see growth curves, --compare <id> to diff vs a past snapshot.
+  Use --snapshot-only to save without printing the full report.
 
 Usage:
     python ml_capacity.py [--host HOST] [--port PORT] [--user USER]
                           [--password PASSWORD] [--database DATABASE]
                           [--auth-type digest|basic]
+                          [--trend] [--compare ID] [--snapshot-only]
+                          [--no-snapshot]
 """
 
 import argparse
 import getpass
 import json
 import math
+import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from base64 import b64encode
@@ -1115,6 +1127,448 @@ def report_capacity_estimate(database, db_props, forest_data, host_data):
             print(f"    {color('!', RED)} {color(title, BOLD)}: {detail}")
 
 
+# ── Snapshots ──────────────────────────────────────────────────────
+
+SNAPSHOT_DIR = Path(__file__).parent / ".ml-capacity"
+
+
+def collect_snapshot(client, database):
+    """Gather all capacity metrics into a single JSON-serializable dict.
+
+    This is the canonical snapshot format — everything the report sections
+    display, collected once, so we can both print and persist from the
+    same data.
+    """
+    snap = {
+        "version": 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database": database,
+    }
+
+    # Cluster
+    cluster_raw = collect_cluster_overview(client)
+    cluster = cluster_raw.get("local-cluster-default", {})
+    snap["cluster"] = {
+        "name": cluster.get("name"),
+        "version": cluster.get("version"),
+    }
+    relations = cluster.get("relations", {}).get("relation-group", [])
+    for rg in relations:
+        t = rg.get("typeref", "")
+        if t in ("hosts", "databases", "forests", "servers"):
+            snap["cluster"][t] = rg.get("relation-count", {}).get("value", 0)
+
+    # Host memory (via eval)
+    try:
+        host_results = collect_host_memory(client)
+        if host_results:
+            raw = host_results[0] if isinstance(host_results[0], list) else [host_results[0]]
+            snap["hosts"] = raw
+        else:
+            snap["hosts"] = []
+    except Exception:
+        snap["hosts"] = []
+
+    # Database status
+    db_raw = collect_database_status(client, database)
+    props = db_raw.get("database-status", {}).get("status-properties", {})
+    snap["database_status"] = {
+        "state":           props.get("state", {}).get("value"),
+        "forests_count":   props.get("forests-count", {}).get("value", 0),
+        "data_size_mb":    props.get("data-size", {}).get("value", 0),
+        "device_space_mb": float(props.get("device-space", {}).get("value", "0")),
+        "in_memory_size_mb": props.get("in-memory-size", {}).get("value", 0),
+        "large_data_size_mb": props.get("large-data-size", {}).get("value", 0),
+        "least_remaining_mb": float(props.get("least-remaining-space-forest", {}).get("value", 0)),
+        "merge_count":     props.get("merge-count", {}).get("value", 0),
+        "list_cache_ratio": props.get("cache-properties", {}).get("list-cache-ratio", {}).get("value", 0),
+    }
+
+    # Forest health (via eval)
+    try:
+        fc_results = collect_forest_counts(client, database)
+        if fc_results:
+            forests = fc_results[0] if isinstance(fc_results[0], list) else [fc_results[0]]
+            snap["forests"] = forests
+        else:
+            snap["forests"] = []
+    except Exception:
+        snap["forests"] = []
+
+    # Database properties (for index config)
+    db_props = collect_database_properties(client, database)
+    snap["db_properties"] = {
+        "in_memory_limit":       db_props.get("in-memory-limit", 131072),
+        "in_memory_list_size":   db_props.get("in-memory-list-size", 256),
+        "in_memory_tree_size":   db_props.get("in-memory-tree-size", 64),
+        "in_memory_range_index_size": db_props.get("in-memory-range-index-size", 8),
+        "in_memory_triple_index_size": db_props.get("in-memory-triple-index-size", 21),
+    }
+
+    # Count indexes
+    range_el = db_props.get("range-element-index", [])
+    range_path = db_props.get("range-path-index", [])
+    range_field = db_props.get("range-field-index", [])
+    enabled_bools = sum(1 for k in [
+        "word-searches", "fast-phrase-searches", "triple-index",
+        "fast-case-sensitive-searches", "fast-diacritic-sensitive-searches",
+        "fast-element-word-searches", "fast-element-phrase-searches",
+        "uri-lexicon", "collection-lexicon", "trailing-wildcard-searches",
+        "three-character-searches", "field-value-searches",
+    ] if db_props.get(k) is True or db_props.get(k) == "true")
+    snap["index_counts"] = {
+        "range_element": len(range_el),
+        "range_path":    len(range_path),
+        "range_field":   len(range_field),
+        "enabled_boolean_indexes": enabled_bools,
+    }
+
+    # Index memory (via eval — ML 11+)
+    try:
+        idx_results = client.eval_javascript(_INDEX_MEMORY_JS, database=database,
+                                             vars={"dbName": database})
+        if idx_results:
+            snap["index_memory"] = idx_results[0]
+        else:
+            snap["index_memory"] = None
+    except Exception:
+        snap["index_memory"] = None
+
+    # Derived totals for easy trending
+    total_docs    = sum(f.get("document-count", 0) or 0 for f in snap["forests"])
+    total_active  = sum(f.get("active-fragment-count", 0) or 0 for f in snap["forests"])
+    total_deleted = sum(f.get("deleted-fragment-count", 0) or 0 for f in snap["forests"])
+    total_disk    = sum(f.get("disk-size-mb", 0) or 0 for f in snap["forests"])
+    total_mem     = sum(f.get("memory-size-mb", 0) or 0 for f in snap["forests"])
+
+    def hsum(key):
+        return sum(float(h.get(key, 0) or 0) for h in snap["hosts"])
+
+    snap["totals"] = {
+        "documents":        total_docs,
+        "active_fragments": total_active,
+        "deleted_fragments": total_deleted,
+        "forest_disk_mb":   total_disk,
+        "forest_memory_mb": total_mem,
+        "host_forest_mb":   hsum("memory-forest-size-mb"),
+        "host_cache_mb":    hsum("memory-cache-size-mb"),
+        "host_rss_mb":      hsum("memory-process-rss-mb"),
+        "host_base_mb":     hsum("host-size-mb"),
+        "host_file_mb":     hsum("memory-file-size-mb"),
+        "system_total_mb":  hsum("memory-system-total-mb"),
+        "system_free_mb":   hsum("memory-system-free-mb"),
+    }
+
+    return snap
+
+
+def save_snapshot(snap):
+    """Save a snapshot to .ml-capacity/ as a timestamped JSON file."""
+    SNAPSHOT_DIR.mkdir(exist_ok=True)
+    ts = snap["timestamp"].replace(":", "").replace("-", "")[:15]
+    db = snap["database"]
+    filename = f"{ts}_{db}.json"
+    path = SNAPSHOT_DIR / filename
+    with open(path, "w") as f:
+        json.dump(snap, f, indent=2, default=str)
+    return path
+
+
+def load_snapshots(database=None):
+    """Load all snapshots, optionally filtered by database. Returns sorted by timestamp."""
+    if not SNAPSHOT_DIR.exists():
+        return []
+    snaps = []
+    for p in sorted(SNAPSHOT_DIR.glob("*.json")):
+        try:
+            with open(p) as f:
+                s = json.load(f)
+            if database and s.get("database") != database:
+                continue
+            s["_file"] = p.name
+            snaps.append(s)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return snaps
+
+
+def list_snapshots(database=None):
+    """Print a table of saved snapshots."""
+    snaps = load_snapshots(database)
+    if not snaps:
+        print("    No snapshots found.")
+        if database:
+            print(f"    (filtered to database '{database}')")
+        return
+
+    print()
+    hdr = f"  {'#':>4}  {'Timestamp':24}  {'Database':16}  {'Documents':>12}  {'Forest Disk':>12}  {'RSS':>10}"
+    print(color(hdr, BOLD))
+    print(color("  " + "-" * (len(hdr) - 2), DIM))
+
+    for i, s in enumerate(snaps):
+        t = s.get("totals", {})
+        ts = s.get("timestamp", "?")[:19].replace("T", " ")
+        db = s.get("database", "?")
+        docs = t.get("documents", 0)
+        disk = t.get("forest_disk_mb", 0)
+        rss  = t.get("host_rss_mb", 0)
+        print(
+            f"  {i:>4}  {ts:24}  {db:16}  {docs:>12,}  "
+            f"{fmt_mb(disk):>12}  {fmt_mb(rss):>10}"
+        )
+    print()
+    return snaps
+
+
+def report_trend(database):
+    """Show growth curves from saved snapshots for a database."""
+    header(f"TREND ANALYSIS: {database}")
+
+    snaps = load_snapshots(database)
+    if len(snaps) < 2:
+        print(f"    Need at least 2 snapshots to show trends (found {len(snaps)}).")
+        print(f"    Run the analyzer multiple times to build history.")
+        return
+
+    sub_header("Snapshot History")
+    list_snapshots(database)
+
+    # Extract time series
+    points = []
+    for s in snaps:
+        t = s.get("totals", {})
+        ts_str = s.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError):
+            continue
+        points.append({
+            "ts": ts,
+            "docs":       t.get("documents", 0),
+            "disk_mb":    t.get("forest_disk_mb", 0),
+            "forest_mb":  t.get("host_forest_mb", 0),
+            "rss_mb":     t.get("host_rss_mb", 0),
+            "fragments":  t.get("active_fragments", 0),
+            "sys_total":  t.get("system_total_mb", 0),
+            "cache_mb":   t.get("host_cache_mb", 0),
+            "base_mb":    t.get("host_base_mb", 0),
+            "file_mb":    t.get("host_file_mb", 0),
+        })
+
+    if len(points) < 2:
+        print("    Insufficient valid data points.")
+        return
+
+    first = points[0]
+    last  = points[-1]
+    span  = (last["ts"] - first["ts"]).total_seconds()
+    days  = span / 86400 if span > 0 else 0
+
+    sub_header("Growth Over Time")
+    kv("Time span", f"{days:.1f} days ({len(points)} snapshots)")
+
+    metrics = [
+        ("Documents",     "docs",      "",    False),
+        ("Forest disk",   "disk_mb",   "MB",  True),
+        ("Forest memory", "forest_mb", "MB",  True),
+        ("RSS",           "rss_mb",    "MB",  True),
+        ("Fragments",     "fragments", "",    False),
+    ]
+
+    for label, key, unit, is_mb in metrics:
+        v_first = first[key]
+        v_last  = last[key]
+        delta   = v_last - v_first
+
+        if is_mb:
+            first_s = fmt_mb(v_first)
+            last_s  = fmt_mb(v_last)
+            delta_s = f"+{fmt_mb(delta)}" if delta >= 0 else f"-{fmt_mb(-delta)}"
+        else:
+            first_s = f"{v_first:,}"
+            last_s  = f"{v_last:,}"
+            delta_s = f"+{delta:,}" if delta >= 0 else f"{delta:,}"
+
+        rate_s = ""
+        if days > 0 and delta != 0:
+            daily = delta / days
+            if is_mb:
+                rate_s = f"  ({fmt_mb(daily)}/day)"
+            else:
+                rate_s = f"  ({daily:,.0f}/day)"
+
+        kv(label, f"{first_s} → {last_s}  {color(delta_s, GREEN if delta >= 0 else RED)}{rate_s}")
+
+    # ── Runway projections based on observed growth ────────────────
+    if days > 0:
+        sub_header("Runway Projections (based on observed growth rate)")
+
+        doc_delta    = last["docs"]      - first["docs"]
+        forest_delta = last["forest_mb"] - first["forest_mb"]
+        disk_delta   = last["disk_mb"]   - first["disk_mb"]
+
+        # Memory runway
+        sys_total   = last["sys_total"]
+        cache_mb    = last["cache_mb"]
+        base_mb     = last["base_mb"]
+        file_mb     = last["file_mb"]
+        forest_now  = last["forest_mb"]
+        fixed_mem   = cache_mb + base_mb + file_mb
+        ceiling     = sys_total * 0.80
+        headroom    = ceiling - fixed_mem - forest_now
+
+        if forest_delta > 0 and headroom > 0:
+            daily_forest = forest_delta / days
+            days_until_mem = headroom / daily_forest
+            kv("Forest memory headroom",   fmt_mb(headroom))
+            kv("Forest growth rate",        f"{fmt_mb(daily_forest)}/day")
+            kv("Days until memory ceiling", f"{color(f'{days_until_mem:.0f} days', BOLD)}")
+        elif forest_delta <= 0:
+            kv("Forest memory trend", color("stable or shrinking — no memory pressure", GREEN))
+
+        # Disk runway
+        db_stat = last  # use last snapshot's totals
+        disk_now = last["disk_mb"]
+        # Need device space from snapshot — pull from any snapshot that has it
+        device_space = 0
+        for s in reversed(snaps):
+            ds = s.get("database_status", {}).get("device_space_mb", 0)
+            if ds:
+                device_space = float(ds)
+                break
+        remaining_disk = s.get("database_status", {}).get("least_remaining_mb", 0)
+        remaining_disk = float(remaining_disk) if remaining_disk else 0
+
+        if disk_delta > 0 and remaining_disk > 0:
+            daily_disk = disk_delta / days
+            days_until_disk = remaining_disk / daily_disk
+            kv("Disk free",                fmt_mb(remaining_disk))
+            kv("Disk growth rate",          f"{fmt_mb(daily_disk)}/day")
+            kv("Days until disk full",      f"{color(f'{days_until_disk:.0f} days', BOLD)}")
+        elif disk_delta <= 0:
+            kv("Disk trend", color("stable or shrinking — no disk pressure", GREEN))
+
+        # Fragment runway
+        MAX_FRAGS = 96_000_000 * max(1, len(snaps[-1].get("forests", [{}])))
+        frag_delta = last["fragments"] - first["fragments"]
+        frag_remaining = MAX_FRAGS - last["fragments"]
+        if frag_delta > 0 and frag_remaining > 0:
+            daily_frags = frag_delta / days
+            days_until_frag = frag_remaining / daily_frags
+            kv("Fragment headroom",         f"{frag_remaining:,}")
+            kv("Fragment growth rate",      f"{daily_frags:,.0f}/day")
+            kv("Days until fragment limit", f"{color(f'{days_until_frag:.0f} days', BOLD)}")
+
+        # Determine binding constraint
+        runways = []
+        if forest_delta > 0 and headroom > 0:
+            runways.append(("memory", days_until_mem))
+        if disk_delta > 0 and remaining_disk > 0:
+            runways.append(("disk", days_until_disk))
+        if frag_delta > 0 and frag_remaining > 0:
+            runways.append(("fragments", days_until_frag))
+
+        if runways:
+            binding = min(runways, key=lambda x: x[1])
+            print()
+            kv("Binding constraint",
+               f"{color(binding[0].upper(), BOLD + RED)} "
+               f"(~{binding[1]:.0f} days at current rate)")
+
+
+def report_compare(database, compare_idx):
+    """Compare current snapshot to a past snapshot by index number."""
+    header(f"COMPARISON: {database}")
+
+    snaps = load_snapshots(database)
+    if not snaps:
+        print("    No snapshots found.")
+        return
+
+    if compare_idx < 0 or compare_idx >= len(snaps):
+        print(f"    Snapshot #{compare_idx} not found. Valid range: 0–{len(snaps)-1}")
+        return
+
+    old = snaps[compare_idx]
+    # Current state = most recent snapshot (or we could collect fresh, but
+    # the caller should have just saved one)
+    new = snaps[-1]
+
+    if old["_file"] == new["_file"]:
+        print("    Comparing snapshot to itself — nothing to show.")
+        print("    Run the analyzer again to create a new snapshot, then compare.")
+        return
+
+    old_ts = old.get("timestamp", "?")[:19].replace("T", " ")
+    new_ts = new.get("timestamp", "?")[:19].replace("T", " ")
+
+    kv("Old snapshot", f"#{compare_idx}  {old_ts}  ({old.get('_file', '?')})")
+    kv("New snapshot", f"#{len(snaps)-1}  {new_ts}  ({new.get('_file', '?')})")
+
+    old_t = old.get("totals", {})
+    new_t = new.get("totals", {})
+
+    # Time elapsed
+    try:
+        t_old = datetime.fromisoformat(old["timestamp"])
+        t_new = datetime.fromisoformat(new["timestamp"])
+        days = (t_new - t_old).total_seconds() / 86400
+        kv("Time elapsed", f"{days:.1f} days")
+    except (ValueError, TypeError):
+        days = 0
+
+    sub_header("Metric Deltas")
+
+    def delta_line(label, old_val, new_val, is_mb=False):
+        d = new_val - old_val
+        if is_mb:
+            old_s = fmt_mb(old_val)
+            new_s = fmt_mb(new_val)
+            d_s   = f"+{fmt_mb(d)}" if d >= 0 else f"-{fmt_mb(-d)}"
+        else:
+            old_s = f"{old_val:,}"
+            new_s = f"{new_val:,}"
+            d_s   = f"+{d:,}" if d >= 0 else f"{d:,}"
+
+        pct = (d / old_val * 100) if old_val else 0
+        pct_s = f"({pct:+.1f}%)" if old_val else ""
+        c = GREEN if d >= 0 else RED
+        kv(label, f"{old_s} → {new_s}  {color(d_s, c)}  {color(pct_s, DIM)}")
+
+    delta_line("Documents",      old_t.get("documents", 0),       new_t.get("documents", 0))
+    delta_line("Active frags",   old_t.get("active_fragments", 0),new_t.get("active_fragments", 0))
+    delta_line("Deleted frags",  old_t.get("deleted_fragments",0),new_t.get("deleted_fragments",0))
+    delta_line("Forest disk",    old_t.get("forest_disk_mb", 0),  new_t.get("forest_disk_mb", 0), True)
+    delta_line("Forest memory",  old_t.get("forest_memory_mb",0), new_t.get("forest_memory_mb",0),True)
+    delta_line("Host forest",    old_t.get("host_forest_mb", 0),  new_t.get("host_forest_mb", 0), True)
+    delta_line("Host RSS",       old_t.get("host_rss_mb", 0),     new_t.get("host_rss_mb", 0),    True)
+    delta_line("System free",    old_t.get("system_free_mb", 0),  new_t.get("system_free_mb", 0), True)
+
+    # Per-doc marginal cost
+    doc_delta = new_t.get("documents", 0) - old_t.get("documents", 0)
+    if doc_delta > 0:
+        sub_header("Marginal Cost Per Document")
+        disk_delta   = new_t.get("forest_disk_mb", 0) - old_t.get("forest_disk_mb", 0)
+        forest_delta = new_t.get("host_forest_mb", 0) - old_t.get("host_forest_mb", 0)
+
+        if disk_delta > 0:
+            kv("Disk bytes/doc",   f"{disk_delta * 1024 * 1024 / doc_delta:,.0f} bytes")
+        if forest_delta > 0:
+            kv("Forest mem bytes/doc", f"{forest_delta * 1024 * 1024 / doc_delta:,.0f} bytes")
+
+    # Index count changes
+    old_ic = old.get("index_counts", {})
+    new_ic = new.get("index_counts", {})
+    if old_ic != new_ic:
+        sub_header("Index Configuration Changes")
+        for k in set(list(old_ic.keys()) + list(new_ic.keys())):
+            ov = old_ic.get(k, 0)
+            nv = new_ic.get(k, 0)
+            if ov != nv:
+                kv(k, f"{ov} → {nv}")
+
+
 # ── Main ────────────────────────────────────────────────────────────
 
 def main():
@@ -1128,7 +1582,25 @@ def main():
     parser.add_argument("--database", default="Documents", help="Database to analyze (default: Documents)")
     parser.add_argument("--auth-type", choices=["digest", "basic"], default="digest", help="Auth type (default: digest)")
 
+    # Snapshot / trend flags
+    parser.add_argument("--trend", action="store_true",
+                        help="Show growth trends from saved snapshots")
+    parser.add_argument("--compare", type=int, metavar="N", default=None,
+                        help="Compare current state to snapshot #N (use --trend to list)")
+    parser.add_argument("--snapshots", action="store_true",
+                        help="List saved snapshots and exit")
+    parser.add_argument("--snapshot-only", action="store_true",
+                        help="Save a snapshot without printing the full report")
+    parser.add_argument("--no-snapshot", action="store_true",
+                        help="Don't save a snapshot on this run")
+
     args = parser.parse_args()
+
+    # ── Snapshot listing (no connection needed) ──────────────────────
+    if args.snapshots:
+        header(f"SAVED SNAPSHOTS: {args.database}")
+        list_snapshots(args.database)
+        sys.exit(0)
 
     if not args.password:
         args.password = getpass.getpass(f"Password for {args.user}@{args.host}: ")
@@ -1143,6 +1615,35 @@ def main():
     """, CYAN))
 
     try:
+        # ── Always collect a snapshot (used for saving + reporting) ──
+        snap = collect_snapshot(client, args.database)
+
+        # ── Save snapshot (unless --no-snapshot) ─────────────────────
+        if not args.no_snapshot:
+            path = save_snapshot(snap)
+            print(f"    {color('Snapshot saved:', DIM)} {path}")
+            print()
+
+        # ── Snapshot-only mode: save and exit ────────────────────────
+        if args.snapshot_only:
+            sys.exit(0)
+
+        # ── Trend mode: show growth curves ───────────────────────────
+        if args.trend:
+            report_trend(args.database)
+            print()
+            sys.exit(0)
+
+        # ── Compare mode: diff current vs past ───────────────────────
+        if args.compare is not None:
+            report_compare(args.database, args.compare)
+            print()
+            sys.exit(0)
+
+        # ── Full report (existing sections, driven from snapshot) ────
+        # The report_ functions still query the server directly for now;
+        # future iteration could render entirely from the snapshot dict.
+
         # 1. Cluster overview
         report_cluster(client)
 
