@@ -3,6 +3,9 @@ WORKDIR /app
 COPY ml_capacity.py .
 RUN mkdir -p /data/.ml-capacity && ln -s /data/.ml-capacity /app/.ml-capacity
 
+ARG BUILD_SHA=dev
+ENV MLCA_BUILD=$BUILD_SHA
+
 ENV MLCA_HOST=localhost
 ENV MLCA_PORT=8002
 ENV MLCA_USER=admin

@@ -39,6 +39,11 @@ from urllib.request import Request, urlopen
 from base64 import b64encode
 
 
+# ── Build info ──────────────────────────────────────────────────────
+
+_BUILD = os.environ.get("MLCA_BUILD", "dev")[:12]
+
+
 # ── Formatting helpers ──────────────────────────────────────────────
 
 YELLOW = "\033[33m"
@@ -2502,6 +2507,9 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 self._serve_ui()
             elif path == "/health":
                 self._respond(200, "application/json", '{"status":"ok"}')
+            elif path == "/api/info":
+                self._respond(200, "application/json",
+                              json.dumps({"build": _BUILD}))
             else:
                 self._respond(404, "text/plain", "Not Found")
 
@@ -2954,7 +2962,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
     <div class="card" id="snap-list"><div class="loading">Loading...</div></div>
   </div>
 
-  <div class="footer">MLCA &mdash; refreshes every 30s</div>
+  <div class="footer">MLCA &mdash; refreshes every 30s &mdash; build <span id="build-sha">...</span></div>
 </div>
 
 <div class="modal-overlay" id="modal">
@@ -3503,6 +3511,10 @@ function refreshActiveTab() {
   else if (activeTab === 'trends') refreshTrends();
   else if (activeTab === 'snapshots') refreshSnapshots();
 }
+
+fetch('/api/info').then(function(r){return r.json();}).then(function(info){
+  document.getElementById('build-sha').textContent = info.build || 'dev';
+}).catch(function(){});
 
 loadDatabases().then(function() { refreshActiveTab(); });
 setInterval(refreshActiveTab, 30000);
