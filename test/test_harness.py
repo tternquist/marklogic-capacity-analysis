@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ml_capacity import (
     MarkLogicClient, collect_snapshot, save_snapshot, load_snapshots,
     check_config_drift, extract_config_fingerprint, SNAPSHOT_DIR,
+    diff_index_memory, _index_label, wait_for_reindex,
     fmt_mb, color, header, sub_header, kv, bar, status_badge,
     BOLD, CYAN, GREEN, RED, YELLOW, DIM, RESET,
 )
@@ -235,6 +236,230 @@ def wait_for_ml(client, timeout=120):
     return False
 
 
+def run_index_impact_test(client, database):
+    """Validate index impact assessment by adding and removing a range index.
+
+    Workflow:
+      1. Snapshot before
+      2. Add range-path-index on /category (test docs have this field)
+      3. Wait for reindex
+      4. Snapshot after
+      5. Compare: verify new index has measurable per-doc cost
+      6. Remove the index
+      7. Wait for reindex
+      8. Snapshot after removal
+      9. Verify index cost is gone
+    """
+    header("INDEX IMPACT VALIDATION")
+
+    # 1. Snapshot before adding index
+    sub_header("Step 1: Snapshot before adding index")
+    before_snap = collect_snapshot(client, database)
+    save_snapshot(before_snap)
+    before_docs = before_snap["totals"]["documents"]
+    kv("Documents", f"{before_docs:,}")
+    before_indexes = before_snap.get("index_memory", {}).get("indexes", [])
+    kv("Current indexes", len(before_indexes))
+
+    if before_docs == 0:
+        print(f"    {color('SKIP: No documents loaded — cannot measure index cost', YELLOW)}")
+        return True
+
+    # 2. Add a range-path-index on /category
+    sub_header("Step 2: Adding range-path-index on /category (string)")
+    # First get current properties to merge with
+    current_props = client.get_json(
+        f"/manage/v2/databases/{database}/properties?format=json"
+    )
+    existing_path_indexes = current_props.get("range-path-index", [])
+
+    new_index = {
+        "scalar-type": "string",
+        "path-expression": "/category",
+        "collation": "http://marklogic.com/collation/",
+        "range-value-positions": False,
+        "invalid-values": "ignore"
+    }
+
+    updated_indexes = existing_path_indexes + [new_index]
+    client.put_json(
+        f"/manage/v2/databases/{database}/properties",
+        {"range-path-index": updated_indexes}
+    )
+    print(f"    {color('Index added.', GREEN)} Waiting for reindex...")
+
+    # 3. Wait for reindex
+    if not wait_for_reindex(client, database, timeout=300):
+        print(f"    {color('WARNING: Reindex timed out after 300s', YELLOW)}")
+    else:
+        print(f"    {color('Reindex complete.', GREEN)}")
+
+    # Force a merge to consolidate index data into stands
+    print(f"    Forcing merge to consolidate index data...")
+    try:
+        client.eval_xquery('''
+        xdmp:merge(
+          <options xmlns="xdmp:merge">
+            <forests>
+              <forest>{xdmp:database-forests(xdmp:database("''' + database + '''"))}</forest>
+            </forests>
+          </options>
+        )
+        ''')
+        # Wait for merge to complete
+        for _ in range(60):
+            data = client.get_json(f"/manage/v2/databases/{database}?view=status&format=json")
+            mc = data.get("database-status", {}).get("status-properties", {}).get("merge-count", {}).get("value", 0)
+            if mc == 0:
+                break
+            time.sleep(2)
+        print(f"    {color('Merge complete.', GREEN)}")
+    except Exception as e:
+        print(f"    {color(f'Merge warning: {e}', YELLOW)}")
+
+    # Warm the index into cache by running a query that uses it
+    print(f"    Warming index into cache...")
+    try:
+        client.eval_xquery(f'''
+        cts:values(cts:path-reference("/category"))
+        ''', database=database)
+    except Exception:
+        pass  # OK if this fails — the index data is still on disk
+
+    time.sleep(3)
+
+    # 4. Snapshot after adding index
+    sub_header("Step 3: Snapshot after adding index")
+    after_add_snap = collect_snapshot(client, database)
+    save_snapshot(after_add_snap)
+
+    # 5. Compare
+    sub_header("Step 4: Validating index impact")
+    diff = diff_index_memory(before_snap, after_add_snap)
+
+    checks = []
+
+    # Check: new index appears in added list
+    added_labels = [_index_label(i) for i in diff["added"]]
+    found_category = any("/category" in l for l in added_labels)
+    checks.append((
+        found_category,
+        f"New /category index detected in added list",
+        f"New /category index NOT found in diff (added: {added_labels})"
+    ))
+
+    # Check per-index detail AND stand-level aggregates
+    # Per-index memoryDetail only shows cached data — may be 0 if not queried.
+    # Stand-level rangeIndexesBytes is more reliable as it includes all on-disk data.
+    per_index_mem = 0
+    per_index_disk = 0
+    if diff["added"]:
+        for idx in diff["added"]:
+            if "/category" in _index_label(idx):
+                per_index_mem = idx.get("totalMemoryBytes", 0) or 0
+                per_index_disk = idx.get("totalOnDiskBytes", 0) or 0
+
+    # Stand-level aggregate comparison
+    def sum_range_bytes(snap):
+        im = snap.get("index_memory") or {}
+        return sum(
+            ss.get("summary", {}).get("rangeIndexesBytes", 0)
+            for ss in im.get("standSummaries", [])
+        )
+
+    before_range = sum_range_bytes(before_snap)
+    after_range = sum_range_bytes(after_add_snap)
+    range_delta = after_range - before_range
+
+    # Also check total forest disk delta
+    before_disk = before_snap.get("totals", {}).get("forest_disk_mb", 0)
+    after_disk = after_add_snap.get("totals", {}).get("forest_disk_mb", 0)
+    disk_delta_mb = after_disk - before_disk
+
+    kv("Per-index memory (cache)", fmt_mb(per_index_mem / (1024*1024)))
+    kv("Per-index disk (cache)",   fmt_mb(per_index_disk / (1024*1024)))
+    kv("Stand rangeIndexesBytes",  f"{before_range:,} → {after_range:,}  (Δ {range_delta:,})")
+    kv("Total forest disk",       f"{fmt_mb(before_disk)} → {fmt_mb(after_disk)}  (Δ {fmt_mb(disk_delta_mb)})")
+
+    if before_docs > 0:
+        # Use the best available signal for per-doc cost
+        if per_index_mem > 0:
+            cost_mem = per_index_mem
+            cost_source = "per-index detail"
+        elif range_delta > 0:
+            cost_mem = range_delta
+            cost_source = "stand aggregate delta"
+        else:
+            cost_mem = 0
+            cost_source = "no signal"
+
+        if cost_mem > 0:
+            mem_per_doc = cost_mem / before_docs
+            kv(f"Memory/doc ({cost_source})", f"{mem_per_doc:,.0f} bytes")
+            checks.append((
+                0 < mem_per_doc < 10240,
+                f"Memory/doc is plausible ({mem_per_doc:,.0f} bytes via {cost_source})",
+                f"Memory/doc out of range ({mem_per_doc:,.0f} bytes)"
+            ))
+        else:
+            # Even if memory is 0 (not cached), disk should show the impact
+            checks.append((
+                disk_delta_mb > 0 or range_delta > 0,
+                f"Index impact detected via disk (Δ{fmt_mb(disk_delta_mb)}) or range bytes (Δ{range_delta:,})",
+                f"No measurable index impact in memory, disk, or range aggregates"
+            ))
+
+    # 6. Remove the index
+    sub_header("Step 5: Removing index")
+    client.put_json(
+        f"/manage/v2/databases/{database}/properties",
+        {"range-path-index": existing_path_indexes}  # restore original
+    )
+    print(f"    {color('Index removed.', GREEN)} Waiting for reindex...")
+
+    if not wait_for_reindex(client, database, timeout=300):
+        print(f"    {color('WARNING: Reindex timed out after 300s', YELLOW)}")
+    else:
+        print(f"    {color('Reindex complete.', GREEN)}")
+
+    time.sleep(3)
+
+    # 7. Snapshot after removal
+    sub_header("Step 6: Snapshot after removing index")
+    after_remove_snap = collect_snapshot(client, database)
+    save_snapshot(after_remove_snap)
+
+    # 8. Validate removal
+    diff_removal = diff_index_memory(after_add_snap, after_remove_snap)
+    removed_labels = [_index_label(i) for i in diff_removal["removed"]]
+    found_removed = any("/category" in l for l in removed_labels)
+    checks.append((
+        found_removed,
+        f"/category index detected in removed list after deletion",
+        f"/category index NOT found in removed list (removed: {removed_labels})"
+    ))
+
+    # Net memory should have decreased
+    net_mem = diff_removal["summary"]["total_mem_delta"]
+    checks.append((
+        net_mem <= 0,
+        f"Total index memory decreased after removal ({net_mem:,} bytes)",
+        f"Total index memory unexpectedly increased ({net_mem:,} bytes)"
+    ))
+
+    # 9. Report results
+    sub_header("Index Impact Validation Results")
+    all_pass = True
+    for ok, pass_msg, fail_msg in checks:
+        if ok:
+            print(f"    {color('PASS', GREEN)}  {pass_msg}")
+        else:
+            print(f"    {color('FAIL', RED)}  {fail_msg}")
+            all_pass = False
+
+    return all_pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MLCA Memory Projection Test Harness"
@@ -252,6 +477,8 @@ def main():
                         help="Documents per phase (default: 100,000)")
     parser.add_argument("--snapshot-dir", default=None,
                         help="Override snapshot directory (default: test/.ml-capacity-harness/)")
+    parser.add_argument("--index-impact", action="store_true",
+                        help="Run index impact validation after loading phases")
 
     args = parser.parse_args()
 
@@ -452,6 +679,12 @@ def main():
 
     else:
         print(f"    No growth data collected. Check that documents are being inserted.")
+
+    # ── Index impact test (optional) ─────────────────────────────────
+    if args.index_impact:
+        index_pass = run_index_impact_test(client, args.database)
+    else:
+        index_pass = None
 
     # ── Final summary ────────────────────────────────────────────────
     sub_header("Test Summary")
