@@ -920,7 +920,8 @@ result;
 """
 
 
-def report_capacity_estimate(database, db_props, forest_data, host_data):
+def report_capacity_estimate(database, db_props, forest_data, host_data,
+                             remaining_disk_mb=0):
     header(f"CAPACITY ESTIMATE: {database}")
 
     if not forest_data:
@@ -1048,12 +1049,14 @@ def report_capacity_estimate(database, db_props, forest_data, host_data):
             print(f"      {color('WARNING: System swap-in active — OS is paging memory!', RED)}")
 
         # ── Doc capacity estimate ──────────────────────────────────────
-        # memory-forest-size is the only component that grows with documents.
-        # Cache (list + compressed-tree) is pre-allocated at startup and fixed.
-        # Base ML overhead (threads, code) is fixed.
-        # File cache (mmap) is OS-managed and bounded separately.
-        # So the marginal memory cost per additional document = forest_mem / doc_count.
-        # Headroom available to forest growth = ceiling - (fixed components + forest_mem)
+        # Disk-based projection is the primary model — disk size grows linearly
+        # and predictably with document count, unlike forest memory which
+        # fluctuates with merge activity, cached stand pages, and query patterns.
+        #
+        # Forest memory (host-level memory-forest-size) is shown as a secondary
+        # indicator but NOT used for the headline projection, because it includes
+        # cached on-disk stand pages that get compressed by merges and don't
+        # scale linearly with doc count.
         print()
         print(f"    {color('Document capacity projection', BOLD)}")
         fixed_mem = cache_alloc + base_overhead + file_cache
@@ -1065,20 +1068,33 @@ def report_capacity_estimate(database, db_props, forest_data, host_data):
            f"{fmt_mb(forest_headroom)}  {status_badge(forest_headroom > 512, 'OK', 'LOW')}",
            indent=6)
 
+        # Primary: disk-based projection
+        if total_docs > 0 and total_disk > 0:
+            disk_bytes_per_doc = (total_disk * 1024 * 1024) / total_docs
+
+            print()
+            print(f"    {color('Disk capacity (primary — most reliable)', BOLD)}")
+            kv("  Current disk size",  fmt_mb(total_disk), indent=6)
+            kv("  Disk bytes/doc",     f"{disk_bytes_per_doc:,.0f}", indent=6)
+
+            if remaining_disk_mb > 0:
+                disk_docs_remaining = int((remaining_disk_mb * 1024 * 1024) / disk_bytes_per_doc)
+                disk_total = total_docs + disk_docs_remaining
+                kv("  Disk remaining",     fmt_mb(remaining_disk_mb), indent=6)
+                kv("  Est. additional documents until disk full",
+                   f"{color(f'{disk_docs_remaining:,}', BOLD)}", indent=6)
+                kv("  Est. total documents at disk full",
+                   f"{disk_total:,}", indent=6)
+
+        # Secondary: forest memory indicator (shown for context, not for projection)
         if total_docs > 0 and forest_mem > 0:
             forest_bytes_per_doc = (forest_mem * 1024 * 1024) / total_docs
-            kv("  Forest memory per document",
-               f"{forest_bytes_per_doc:.0f} bytes", indent=6)
+            print()
+            print(f"    {color('Forest memory indicator (secondary — fluctuates with merges)', BOLD)}")
+            kv("  Forest memory/doc (snapshot)", f"{forest_bytes_per_doc:,.0f} bytes", indent=6)
+            kv("  Note", color("Forest memory includes cached stand pages that compress", DIM), indent=6)
+            kv("      ", color("during merges. Use --trend for growth-rate projections.", DIM), indent=6)
 
-            if forest_headroom > 0:
-                docs_remaining = int((forest_headroom * 1024 * 1024) / forest_bytes_per_doc)
-                kv("  Est. additional documents until ceiling",
-                   f"{color(f'{docs_remaining:,}', BOLD)}", indent=6)
-                total_capacity = total_docs + docs_remaining
-                kv("  Est. total documents at ceiling",
-                   f"{total_capacity:,}", indent=6)
-            else:
-                print(f"      {color('WARNING: Forest memory headroom exhausted!', RED)}")
         elif total_docs == 0:
             kv("  No documents loaded yet", "load docs to establish per-doc baseline", indent=6)
 
@@ -1827,7 +1843,8 @@ def main():
         report_index_memory(client, args.database)
 
         # 7. Capacity estimation
-        report_capacity_estimate(args.database, db_props, forest_data, host_data)
+        report_capacity_estimate(args.database, db_props, forest_data, host_data,
+                                remaining_disk_mb=remaining)
 
         print()
         print(color("=" * 62, DIM))
