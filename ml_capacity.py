@@ -2869,6 +2869,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   <div id="tab-dashboard" class="tab-content active">
     <div class="hero" id="hero"></div>
     <div class="grid" id="grid"></div>
+    <div id="projections-section" style="display:none">
+      <h3>Capacity Projections</h3>
+      <div class="grid" id="projections"></div>
+    </div>
     <h3>Index Memory Usage</h3>
     <div class="card" id="indexes"><div class="loading">Loading...</div></div>
   </div>
@@ -3074,6 +3078,84 @@ async function refreshDashboard() {
     } else {
       document.getElementById('indexes').innerHTML = '<div class="loading">No index memory data available</div>';
     }
+
+    // Capacity projections from trend data
+    try {
+      var trend = await (await fetch('/api/trend' + dbParam())).json();
+      var projSec = document.getElementById('projections-section');
+      if (trend.length >= 2) {
+        var first = trend[0], last = trend[trend.length - 1];
+        var t0 = new Date(first.timestamp).getTime(), t1 = new Date(last.timestamp).getTime();
+        var spanDays = (t1 - t0) / 86400000;
+        if (spanDays > 0) {
+          var forestFirst = first.host_forest_mb || 0, forestLast = last.host_forest_mb || 0;
+          var docsFirst = first.documents || 0, docsLast = last.documents || 0;
+          var diskFirst = first.forest_disk_mb || 0, diskLast = last.forest_disk_mb || 0;
+          var forestDelta = forestLast - forestFirst;
+          var docDelta = docsLast - docsFirst;
+          var diskDelta = diskLast - diskFirst;
+          var dailyForest = forestDelta / spanDays;
+          var dailyDocs = docDelta / spanDays;
+          var dailyDisk = diskDelta / spanDays;
+
+          var proj = '';
+          // Memory runway
+          if (forestDelta > 0 && headroom > 0) {
+            var daysUntilMem = headroom / dailyForest;
+            var etaDate = new Date(Date.now() + daysUntilMem * 86400000);
+            var etaStr = etaDate.getFullYear() + '-' + String(etaDate.getMonth()+1).padStart(2,'0') + '-' + String(etaDate.getDate()).padStart(2,'0');
+            var runwayClass = daysUntilMem < 30 ? 'crit' : daysUntilMem < 90 ? 'warn' : 'good';
+            proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
+              metric('Forest growth rate', fmt(dailyForest) + '/day') +
+              metric('Days until ceiling', '<span class="metric-val ' + runwayClass + '">' + Math.round(daysUntilMem) + ' days</span>', '') +
+              metric('ETA', etaStr) +
+              metric('Observed period', spanDays.toFixed(1) + ' days (' + trend.length + ' snapshots)');
+
+            if (docDelta > 0) {
+              var bytesPerDoc = (forestDelta * 1048576) / docDelta;
+              var docsUntilCeiling = Math.round((headroom * 1048576) / bytesPerDoc);
+              proj += metric('Forest memory/doc', Math.round(bytesPerDoc).toLocaleString() + ' bytes') +
+                      metric('Docs until ceiling', '<span class="metric-val ' + runwayClass + '">' + fmtNum(docsUntilCeiling) + '</span>', '');
+            }
+            proj += '</div>';
+          } else if (forestDelta <= 0) {
+            proj += '<div class="card"><div class="card-title">Memory Runway</div>' +
+              metric('Status', 'Stable or shrinking', 'good') +
+              metric('Observed period', spanDays.toFixed(1) + ' days (' + trend.length + ' snapshots)') +
+              '</div>';
+          }
+
+          // Disk runway
+          var diskRemain = Number((snap.database_status || {}).least_remaining_mb || 0);
+          if (diskDelta > 0 && diskRemain > 0) {
+            var daysUntilDisk = diskRemain / dailyDisk;
+            var diskEta = new Date(Date.now() + daysUntilDisk * 86400000);
+            var diskEtaStr = diskEta.getFullYear() + '-' + String(diskEta.getMonth()+1).padStart(2,'0') + '-' + String(diskEta.getDate()).padStart(2,'0');
+            var diskClass = daysUntilDisk < 30 ? 'crit' : daysUntilDisk < 90 ? 'warn' : 'good';
+            proj += '<div class="card"><div class="card-title">Disk Runway</div>' +
+              metric('Disk growth rate', fmt(dailyDisk) + '/day') +
+              metric('Remaining', fmt(diskRemain)) +
+              metric('Days until full', '<span class="metric-val ' + diskClass + '">' + Math.round(daysUntilDisk) + ' days</span>', '') +
+              metric('ETA', diskEtaStr) +
+              '</div>';
+          }
+
+          // Document growth
+          if (dailyDocs > 0) {
+            proj += '<div class="card"><div class="card-title">Document Growth</div>' +
+              metric('Current count', fmtNum(docsLast)) +
+              metric('Growth rate', fmtNum(Math.round(dailyDocs)) + '/day') +
+              metric('Growth over period', '+' + fmtNum(docDelta)) +
+              '</div>';
+          }
+
+          if (proj) {
+            document.getElementById('projections').innerHTML = proj;
+            projSec.style.display = 'block';
+          } else { projSec.style.display = 'none'; }
+        } else { projSec.style.display = 'none'; }
+      } else { projSec.style.display = 'none'; }
+    } catch(e2) { /* projections are optional */ }
   } catch(e) {
     document.getElementById('subtitle').textContent = 'Error: ' + e.message;
   }
