@@ -1482,7 +1482,10 @@ def _values_match(a, b, field_name=""):
     """
     if a == b:
         return True
-    # Treat None or 0 as "unknown" — don't flag drift for missing data
+    # Treat None or 0 as "unknown" — don't flag drift for missing data.
+    # Trade-off: won't detect removal of ALL range indexes (count→0), but
+    # that's extremely rare and the alternative (false alarms in containers
+    # where OS metrics start as 0/None) is worse.
     if a is None or b is None or a == 0 or b == 0:
         return True
     if field_name in _FUZZY_MB_FIELDS and isinstance(a, (int, float)) and isinstance(b, (int, float)):
