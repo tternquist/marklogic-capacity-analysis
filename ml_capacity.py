@@ -32,7 +32,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -1672,6 +1672,26 @@ def save_snapshot(snap):
     return path
 
 
+def prune_snapshots(retention_days):
+    """Delete snapshot files older than retention_days. 0 means keep all."""
+    if retention_days <= 0 or not SNAPSHOT_DIR.exists():
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    removed = 0
+    for p in sorted(SNAPSHOT_DIR.glob("*.json")):
+        try:
+            # Parse timestamp from filename: YYYYMMDDTHHMMSS_DB.json
+            ts_str = p.stem.split("_")[0]
+            ts = datetime.strptime(ts_str, "%Y%m%dT%H%M%S").replace(
+                tzinfo=timezone.utc)
+            if ts < cutoff:
+                p.unlink()
+                removed += 1
+        except (ValueError, IndexError, OSError):
+            continue
+    return removed
+
+
 def load_snapshots(database=None):
     """Load all snapshots, optionally filtered by database. Returns sorted by timestamp."""
     if not SNAPSHOT_DIR.exists():
@@ -2397,7 +2417,8 @@ def parse_interval(s):
     return int(s)  # bare number = seconds
 
 
-def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
+def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
+                retention_days=30):
     """Run MLCA as a persistent service with HTTP endpoints.
 
     Collects snapshots on schedule, serves /metrics, /api/*, and web UI.
@@ -2428,6 +2449,12 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None):
         """Run collection on a repeating interval."""
         while True:
             collect_all()
+            # Prune old snapshots
+            removed = prune_snapshots(retention_days)
+            if removed:
+                print(f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
+                      f"Pruned {removed} snapshot(s) older than "
+                      f"{retention_days} days")
             # Push to OTLP if configured
             if otlp_endpoint:
                 with lock:
@@ -3422,6 +3449,8 @@ def main():
                         help="HTTP port for service mode (default: 9090)")
     parser.add_argument("--interval", default="15m",
                         help="Collection interval for service mode: 5m, 15m, 1h (default: 15m)")
+    parser.add_argument("--retention-days", type=int, default=30,
+                        help="Delete snapshots older than N days (default: 30, 0=keep all)")
     parser.add_argument("--format", choices=["text", "prometheus", "json"], default="text",
                         help="Output format: text (default), prometheus, json")
     parser.add_argument("--otlp-endpoint", default=None, metavar="URL",
@@ -3445,7 +3474,8 @@ def main():
         databases = [args.database]
         interval_sec = parse_interval(args.interval)
         run_service(client, databases, interval_sec, args.serve_port,
-                    otlp_endpoint=args.otlp_endpoint)
+                    otlp_endpoint=args.otlp_endpoint,
+                    retention_days=args.retention_days)
         sys.exit(0)
 
     # ── One-shot format modes ────────────────────────────────────
@@ -3474,6 +3504,9 @@ def main():
         if not args.no_snapshot:
             path = save_snapshot(snap)
             print(f"    {color('Snapshot saved:', DIM)} {path}")
+            removed = prune_snapshots(args.retention_days)
+            if removed:
+                print(f"    {color(f'Pruned {removed} snapshot(s) older than {args.retention_days} days', DIM)}")
             print()
 
         # ── Snapshot-only mode: save and exit ────────────────────────

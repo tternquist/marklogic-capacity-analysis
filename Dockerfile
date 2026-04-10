@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY ml_capacity.py .
-RUN mkdir -p /data/.ml-capacity
+RUN mkdir -p /data/.ml-capacity && ln -s /data/.ml-capacity /app/.ml-capacity
 
 ENV MLCA_HOST=localhost
 ENV MLCA_PORT=8002
@@ -11,6 +11,7 @@ ENV MLCA_AUTH_TYPE=digest
 ENV MLCA_DATABASE=Documents
 ENV MLCA_INTERVAL=15m
 ENV MLCA_SERVE_PORT=9090
+ENV MLCA_RETENTION_DAYS=30
 
 EXPOSE 9090
 
@@ -23,4 +24,5 @@ CMD python3 ml_capacity.py \
     --database $MLCA_DATABASE \
     --serve \
     --interval $MLCA_INTERVAL \
-    --serve-port $MLCA_SERVE_PORT
+    --serve-port $MLCA_SERVE_PORT \
+    --retention-days $MLCA_RETENTION_DAYS
