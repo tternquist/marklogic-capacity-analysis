@@ -293,6 +293,60 @@ class MarkLogicClient:
             with urlopen(req) as resp:
                 return resp.status
 
+    def post_json(self, path, data=None):
+        """POST JSON to a Management API endpoint; return HTTP status."""
+        url = f"{self.base}{path}"
+        body = json.dumps(data).encode() if data is not None else b""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        if self.auth_type == "basic":
+            headers["Authorization"] = self._basic_auth_header()
+
+        try:
+            req = Request(url, data=body, headers=headers, method="POST")
+            with urlopen(req) as resp:
+                return resp.status
+        except HTTPError as e:
+            if e.code not in (401,) or self.auth_type == "basic":
+                raise
+            auth_header = e.headers.get("WWW-Authenticate", "")
+            if "Digest" not in auth_header:
+                raise
+            headers["Authorization"] = self._digest_response(
+                auth_header, "POST", path
+            )
+            req = Request(url, data=body, headers=headers, method="POST")
+            with urlopen(req) as resp:
+                return resp.status
+
+    def delete_resource(self, path):
+        """DELETE a Management API resource; return HTTP status."""
+        url = f"{self.base}{path}"
+        headers = {"Accept": "application/json"}
+
+        if self.auth_type == "basic":
+            headers["Authorization"] = self._basic_auth_header()
+
+        try:
+            req = Request(url, headers=headers, method="DELETE")
+            with urlopen(req) as resp:
+                return resp.status
+        except HTTPError as e:
+            if e.code != 401 or self.auth_type == "basic":
+                raise
+            auth_header = e.headers.get("WWW-Authenticate", "")
+            if "Digest" not in auth_header:
+                raise
+            headers["Authorization"] = self._digest_response(
+                auth_header, "DELETE", path
+            )
+            req = Request(url, headers=headers, method="DELETE")
+            with urlopen(req) as resp:
+                return resp.status
+
     def _parse_eval_response(self, text):
         """Parse multipart/mixed eval response into JSON values."""
         results = []
@@ -367,7 +421,13 @@ def collect_host_memory(client):
       memory-cache-size       — List cache + compressed-tree cache allocated
       memory-forest-size      — In-memory stands across all forests on host
       memory-file-size        — OS file cache (mmap) pages held by ML
-      host-size               — Base ML overhead (threads, code, bookkeeping)
+      host-size               — DISK metric: total on-disk size of all forests on this
+                                host (sum of stand disk-size across all forests).
+                                Despite appearing in xdmp:host-status() alongside memory
+                                metrics it measures storage, not RAM. Correlates with
+                                memory pressure in constrained containers (OS page-caches
+                                forest files) but is NOT a memory component — do not use
+                                in RAM ceiling calculations on production clusters.
       memory-join-size        — Active join workspace
       memory-unclosed-size    — Stands currently being merged (transient)
       memory-registry-size    — Registry memory
@@ -1256,18 +1316,27 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
     total_frags = total_active + total_deleted
     frag_pct = (total_deleted / total_frags * 100) if total_frags > 0 else 0
 
-    # In-memory settings from db properties
-    in_mem_limit_kb = db_props.get("in-memory-limit", 131072)  # default 128 MB in KB
-    in_mem_list_mb = db_props.get("in-memory-list-size", 256)
-    in_mem_tree_mb = db_props.get("in-memory-tree-size", 64)
-    in_mem_range_mb = db_props.get("in-memory-range-index-size", 8)
-    in_mem_triple_mb = db_props.get("in-memory-triple-index-size", 21)
+    # In-memory settings from db properties.
+    # Real ML defaults (confirmed against Management API): limit=32768 KB,
+    # list=64 MB, tree=16 MB, range=2 MB, reverse=2 MB, triple=16 MB.
+    # These settings directly determine how much RAM an in-memory stand
+    # occupies before it is flushed to disk (validated: sum ≈ observed peak).
+    in_mem_limit_kb    = db_props.get("in-memory-limit", 32768)           # flush trigger (KB)
+    in_mem_list_mb     = db_props.get("in-memory-list-size", 64)          # word/element lists
+    in_mem_tree_mb     = db_props.get("in-memory-tree-size", 16)          # compressed trees
+    in_mem_range_mb    = db_props.get("in-memory-range-index-size", 2)    # range index entries
+    in_mem_reverse_mb  = db_props.get("in-memory-reverse-index-size", 2)  # reverse index
+    in_mem_triple_mb   = db_props.get("in-memory-triple-index-size", 16)  # triple index
 
-    # Total in-memory budget per forest for the in-memory stand
-    # The in-memory-limit controls max fragments in the in-memory stand before flush
-    # The other settings control memory allocated for structures
-    in_mem_total_per_forest = in_mem_list_mb + in_mem_tree_mb + in_mem_range_mb + in_mem_triple_mb
-    in_mem_total_all = in_mem_total_per_forest * num_forests
+    # Sum of per-forest in-memory components = peak RAM consumed by one
+    # active in-memory stand.  Each forest can hold one in-memory stand at
+    # a time; when it hits in-memory-limit the stand is flushed to disk.
+    # This memory must be reserved as *ingestion headroom* — it is not
+    # visible in a snapshot taken at rest (no active load).
+    in_mem_per_forest = (in_mem_list_mb + in_mem_tree_mb
+                         + in_mem_range_mb + in_mem_reverse_mb
+                         + in_mem_triple_mb)
+    in_mem_total_all  = in_mem_per_forest * num_forests
 
     sub_header("Current State")
     kv("Total documents", f"{total_docs:,}")
@@ -1301,9 +1370,16 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
         kv("Est. documents until fragment limit", f"{docs_remaining_by_frags:,}")
 
     sub_header("In-Memory Stand Limits")
-    kv("in-memory-limit (flush threshold)", f"{in_mem_limit_kb:,} KB ({in_mem_limit_kb // 1024} MB)")
-    kv("Per-forest memory budget", f"{in_mem_total_per_forest} MB (list:{in_mem_list_mb} + tree:{in_mem_tree_mb} + range:{in_mem_range_mb} + triple:{in_mem_triple_mb})")
-    kv("Total in-memory budget", f"{in_mem_total_all} MB across {num_forests} forest(s)")
+    kv("in-memory-limit (flush trigger)",
+       f"{in_mem_limit_kb:,} KB — stand flushed to disk when list reaches this size")
+    kv("Per-forest stand budget",
+       f"{in_mem_per_forest} MB  "
+       f"(list:{in_mem_list_mb} + tree:{in_mem_tree_mb} + range:{in_mem_range_mb}"
+       f" + reverse:{in_mem_reverse_mb} + triple:{in_mem_triple_mb})")
+    kv("Ingestion reserve (all forests)",
+       f"{color(fmt_mb(in_mem_total_all), YELLOW)}  "
+       f"({num_forests} forest(s) × {in_mem_per_forest} MB)  "
+       f"— RAM that must remain free during bulk loads")
 
     # Memory-based capacity using the detailed component breakdown
     if host_data:
@@ -1343,7 +1419,9 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
         # ── Forest memory is the piece that grows with documents ───────
         # cache_alloc is configured upfront (list cache + tree cache)
         # forest_mem grows with in-memory stand activity
-        # base_overhead is fixed
+        # NOTE: base_overhead = host-size = total forest DISK on host (not RAM).
+        # It correlates with memory pressure in containers (OS page-caches forest files)
+        # but should not be treated as a fixed RAM component on production clusters.
         # So headroom for more data = headroom in forest_mem + any unallocated cache
         print()
         print(f"    {color('Headroom analysis', BOLD)}")
@@ -1362,14 +1440,36 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
         headroom = safe_cap - rss
         rss_pct  = (rss / safe_cap * 100) if safe_cap else 0
 
+        # Ingestion headroom = how much RSS slack remains after reserving
+        # one in-memory stand per forest.  A snapshot taken at rest will not
+        # show this memory as consumed, but it will be occupied the moment a
+        # bulk load begins.  If ingestion_headroom < 0, a large load will
+        # push RSS over the ceiling before the data even hits disk.
+        ingestion_headroom = headroom - in_mem_total_all
+
         kv("  Configured ML limit",        fmt_mb(ml_limit) if ml_limit else "not set", indent=6)
         kv("  Safe capacity (80% RAM)",     fmt_mb(total_sys * 0.80), indent=6)
         kv("  Effective ceiling",           fmt_mb(safe_cap), indent=6)
         kv("  Current RSS vs ceiling",
            f"{fmt_mb(rss)}  {bar(rss_pct)}", indent=6)
-        kv("  Headroom remaining",
+        kv("  Headroom (at rest)",
            f"{fmt_mb(headroom)}  {status_badge(headroom > 1024, 'OK', 'LOW')}",
            indent=6)
+        kv("  In-memory stand reserve",
+           f"{color(fmt_mb(in_mem_total_all), YELLOW)}  "
+           f"({num_forests} forest(s) × {in_mem_per_forest} MB  "
+           f"— occupied during bulk load)", indent=6)
+        kv("  Headroom during bulk load",
+           f"{fmt_mb(ingestion_headroom)}  "
+           f"{status_badge(ingestion_headroom > 512, 'OK', 'LOW')}",
+           indent=6)
+
+        if ingestion_headroom < 0:
+            print(f"      {color('WARNING: In-memory stand reserve exceeds available headroom!', RED)}")
+            print(f"      {color('Bulk loads may push RSS over ceiling. Reduce in-memory-* settings', RED)}")
+            print(f"      {color('or add RAM before running large ingestion jobs.', RED)}")
+        elif ingestion_headroom < 512:
+            print(f"      {color('Caution: Limited headroom during bulk loads. Monitor RSS closely.', YELLOW)}")
 
         if swap > 0:
             print(f"      {color('WARNING: ML is using swap (' + fmt_mb(swap) + ') — memory is over-committed!', RED)}")
@@ -1390,10 +1490,20 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
         fixed_mem = cache_alloc + base_overhead + file_cache
         forest_headroom = safe_cap - fixed_mem - forest_mem
 
+        # During ingestion one in-memory stand per forest is held in RAM.
+        # Subtract that from forest_headroom to get the headroom available
+        # for *new* data while a load is in progress.
+        forest_headroom_loading = forest_headroom - in_mem_total_all
+
         kv("  Fixed components (cache+base+file)", fmt_mb(fixed_mem),         indent=6)
         kv("  Current forest memory",              fmt_mb(forest_mem),        indent=6)
-        kv("  Remaining for forest growth",
+        kv("  Remaining for forest growth (at rest)",
            f"{fmt_mb(forest_headroom)}  {status_badge(forest_headroom > 512, 'OK', 'LOW')}",
+           indent=6)
+        kv("  Remaining for forest growth (during load)",
+           f"{fmt_mb(forest_headroom_loading)}  "
+           f"{color('(' + fmt_mb(in_mem_total_all) + ' reserved for in-memory stands)', DIM)}  "
+           f"{status_badge(forest_headroom_loading > 256, 'OK', 'LOW')}",
            indent=6)
 
         # ── Fragmentation warning ──────────────────────────────────────
@@ -1457,9 +1567,12 @@ def report_capacity_estimate(database, db_props, forest_data, host_data,
             forest_bytes_per_doc = (forest_mem * 1024 * 1024) / total_docs
             print()
             print(f"    {color('Memory runway (use --trend for growth-rate projection)', BOLD)}")
-            kv("  Current forest memory",         fmt_mb(forest_mem), indent=6)
-            kv("  Forest headroom",               fmt_mb(forest_headroom), indent=6)
-            kv("  Forest memory/doc (snapshot)",   f"{forest_bytes_per_doc:,.0f} bytes", indent=6)
+            kv("  Current forest memory",              fmt_mb(forest_mem),            indent=6)
+            kv("  Forest headroom (at rest)",          fmt_mb(forest_headroom),        indent=6)
+            kv("  Forest headroom (during load)",      fmt_mb(forest_headroom_loading),indent=6)
+            kv("  In-memory stand reserve",
+               f"{fmt_mb(in_mem_total_all)}  (tunable via in-memory-* DB settings)",  indent=6)
+            kv("  Forest memory/doc (snapshot)",       f"{forest_bytes_per_doc:,.0f} bytes", indent=6)
             print()
             print(f"      {color('Memory is the binding constraint in most deployments.', YELLOW)}")
             print(f"      {color('Forest memory fluctuates with merges — point-in-time snapshots', DIM)}")
@@ -1594,12 +1707,13 @@ def collect_snapshot(client, database):
     # Database properties (for index config)
     db_props = collect_database_properties(client, database)
     snap["db_properties"] = {
-        "in_memory_limit":       db_props.get("in-memory-limit", 131072),
-        "in_memory_list_size":   db_props.get("in-memory-list-size", 256),
-        "in_memory_tree_size":   db_props.get("in-memory-tree-size", 64),
-        "in_memory_range_index_size": db_props.get("in-memory-range-index-size", 8),
-        "in_memory_triple_index_size": db_props.get("in-memory-triple-index-size", 21),
-        "preload_mapped_data":   db_props.get("preload-mapped-data", False),
+        "in_memory_limit":            db_props.get("in-memory-limit", 32768),
+        "in_memory_list_size":        db_props.get("in-memory-list-size", 64),
+        "in_memory_tree_size":        db_props.get("in-memory-tree-size", 16),
+        "in_memory_range_index_size": db_props.get("in-memory-range-index-size", 2),
+        "in_memory_reverse_index_size": db_props.get("in-memory-reverse-index-size", 2),
+        "in_memory_triple_index_size":  db_props.get("in-memory-triple-index-size", 16),
+        "preload_mapped_data":        db_props.get("preload-mapped-data", False),
     }
 
     # Count indexes
@@ -1773,12 +1887,13 @@ def extract_config_fingerprint(snap):
         "host_count":       cluster.get("hosts", 0),
         "forest_count":     db_status.get("forests_count", 0),
         "hosts":            host_configs,
-        "in_memory_limit":       db_props.get("in_memory_limit"),
-        "in_memory_list_size":   db_props.get("in_memory_list_size"),
-        "in_memory_tree_size":   db_props.get("in_memory_tree_size"),
+        "in_memory_limit":            db_props.get("in_memory_limit"),
+        "in_memory_list_size":        db_props.get("in_memory_list_size"),
+        "in_memory_tree_size":        db_props.get("in_memory_tree_size"),
         "in_memory_range_index_size": db_props.get("in_memory_range_index_size"),
-        "in_memory_triple_index_size": db_props.get("in_memory_triple_index_size"),
-        "preload_mapped_data":  db_props.get("preload_mapped_data"),
+        "in_memory_reverse_index_size": db_props.get("in_memory_reverse_index_size"),
+        "in_memory_triple_index_size":  db_props.get("in_memory_triple_index_size"),
+        "preload_mapped_data":        db_props.get("preload_mapped_data"),
         "range_element_indexes": idx_counts.get("range_element", 0),
         "range_path_indexes":    idx_counts.get("range_path", 0),
         "range_field_indexes":   idx_counts.get("range_field", 0),
@@ -1890,11 +2005,12 @@ def report_config_drift(snaps):
         "host_count":                "Number of hosts in cluster",
         "forest_count":              "Number of forests on database",
         "host_configs":              "Host topology",
-        "in_memory_limit":           "In-memory stand flush threshold (KB)",
-        "in_memory_list_size":       "In-memory list size (MB)",
-        "in_memory_tree_size":       "In-memory tree size (MB)",
-        "in_memory_range_index_size":"In-memory range index size (MB)",
-        "in_memory_triple_index_size":"In-memory triple index size (MB)",
+        "in_memory_limit":              "In-memory stand flush threshold (KB)",
+        "in_memory_list_size":          "In-memory list size (MB)",
+        "in_memory_tree_size":          "In-memory tree size (MB)",
+        "in_memory_range_index_size":   "In-memory range index size (MB)",
+        "in_memory_reverse_index_size": "In-memory reverse index size (MB)",
+        "in_memory_triple_index_size":  "In-memory triple index size (MB)",
         "preload_mapped_data":       "Preload mapped data (range indexes loaded on forest open)",
         "range_element_indexes":     "Element range index count",
         "range_path_indexes":        "Path range index count",
@@ -2303,7 +2419,7 @@ def snapshot_to_prometheus(snap):
               "Forest in-memory stand memory at host level in MB",
               host.get("memory-forest-size-mb"), h_labels)
         gauge("mlca_host_base_mb",
-              "Base ML overhead in MB (threads, code — fixed)",
+              "Total forest disk on host in MB (host-size; correlates with RAM in containers)",
               host.get("host-size-mb"), h_labels)
         gauge("mlca_host_file_mb",
               "OS file cache (mmap) pages in MB",
@@ -3104,7 +3220,7 @@ async function refreshDashboard() {
     grid += '<div class="card"><div class="card-title">Memory Breakdown</div>' +
       metric('Cache (list+tree)', fmt(cache)) +
       metric('Forest stands', fmt(forest)) +
-      metric('Base ML overhead' + baseNote, fmt(base), baseNote ? 'warn' : '') +
+      metric('Forest disk / host-size' + baseNote, fmt(base), baseNote ? 'warn' : '') +
       metric('File cache', fmt(file)) +
       metric('Fixed total', fmt(fixed)) +
       metric('Ceiling (80% RAM)', fmt(ceiling)) +
