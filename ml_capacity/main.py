@@ -11,7 +11,7 @@ from ml_capacity.validation import validate_database_name
 from ml_capacity.client import MarkLogicClient
 from ml_capacity.snapshot import (
     SNAPSHOT_DIR, collect_snapshot, save_snapshot, prune_snapshots,
-    load_snapshots, list_snapshots,
+    load_snapshots, list_snapshots, import_snapshots,
 )
 from ml_capacity.report import (
     report_cluster, report_host_memory, report_database_stats,

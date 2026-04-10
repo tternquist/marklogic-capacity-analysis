@@ -206,6 +206,54 @@ def load_snapshots(database=None):
     return snaps
 
 
+def import_snapshots(file_paths):
+    """Import snapshot JSON files from disconnected environments.
+
+    Validates the snapshot structure, then saves each file into the
+    .ml-capacity/ directory using the standard naming convention.
+    Returns the number of successfully imported snapshots.
+    """
+    from ml_capacity.validation import validate_database_name
+    from ml_capacity.formatting import YELLOW, GREEN
+
+    REQUIRED_KEYS = {"version", "timestamp", "database", "hosts", "forests", "totals"}
+    imported = 0
+
+    for fpath in file_paths:
+        p = Path(fpath)
+        if not p.exists():
+            print(f"    {color('SKIP', YELLOW)}: file not found: {fpath}")
+            continue
+        try:
+            with open(p) as f:
+                snap = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    {color('SKIP', YELLOW)}: invalid JSON in {p.name}: {e}")
+            continue
+
+        missing = REQUIRED_KEYS - set(snap.keys())
+        if missing:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} missing required keys: {', '.join(sorted(missing))}")
+            continue
+
+        if snap.get("version", 0) != 1:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} has unsupported version {snap.get('version')}")
+            continue
+
+        db = snap.get("database", "")
+        try:
+            validate_database_name(db)
+        except ValueError:
+            print(f"    {color('SKIP', YELLOW)}: {p.name} has invalid database name '{db}'")
+            continue
+
+        saved_path = save_snapshot(snap)
+        print(f"    {color('OK', GREEN)}: {p.name} → {saved_path.name}")
+        imported += 1
+
+    return imported
+
+
 def list_snapshots(database=None):
     """Print a table of saved snapshots."""
     snaps = load_snapshots(database)

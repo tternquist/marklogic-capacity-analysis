@@ -25,7 +25,7 @@
  * Requirements:
  *   - The user executing this script needs the following privileges:
  *       xdmp:host-status, xdmp:forest-status, xdmp:forest-counts,
- *       xdmp:hosts, xdmp:database-forests
+ *       xdmp:hosts, xdmp:database-forests, admin-module-read
  *   - For index memory detail (ML 11+): xdmp:database-describe-indexes
  */
 
@@ -39,29 +39,25 @@ var now = new Date();
 // ── 1. Cluster overview ──────────────────────────────────────────────
 var clusterName = xdmp.clusterName();
 var version = xdmp.version();
-var hostIds = xdmp.hosts();
-var hostCount = fn.count(hostIds);
-var dbIds = xdmp.databases();
-var dbCount = fn.count(dbIds);
-var forestIds = xdmp.forests();
-var forestCount = fn.count(forestIds);
+var hostIds = Array.from(xdmp.hosts());
+var dbIds = Array.from(xdmp.databases());
+var allForestIds = Array.from(xdmp.forests());
 
 var cluster = {
   name: clusterName,
   version: version,
-  hosts: hostCount,
-  databases: dbCount,
-  forests: forestCount,
+  hosts: hostIds.length,
+  databases: dbIds.length,
+  forests: allForestIds.length,
   servers: 0
 };
 
 // Count app servers
 try {
   var serverCount = 0;
-  var groups = xdmp.groups().toArray();
+  var groups = Array.from(xdmp.groups());
   for (var g = 0; g < groups.length; g++) {
-    var servers = xdmp.groupServers(groups[g]);
-    serverCount += fn.count(servers);
+    serverCount += fn.count(xdmp.groupServers(groups[g]));
   }
   cluster.servers = serverCount;
 } catch (e) {
@@ -69,49 +65,44 @@ try {
 }
 
 // ── 2. Host memory ──────────────────────────────────────────────────
+// xdmp.hostStatus() returns a JSON ObjectNode in SJS — use .toObject()
+// to get a plain JS object with camelCase property names.
 var hosts = [];
-var hostArr = hostIds.toArray();
-for (var i = 0; i < hostArr.length; i++) {
-  var hostId = hostArr[i];
-  var s = fn.head(xdmp.hostStatus(hostId));
-  // Extract values via xpath on the status node
-  var getVal = function(node, localName) {
-    var seq = node.xpath("//*[local-name()='" + localName + "']/data(.)");
-    var arr = seq.toArray();
-    return arr.length > 0 ? Number(arr[0]) : 0;
-  };
+for (var i = 0; i < hostIds.length; i++) {
+  var hostId = hostIds[i];
+  var hs = fn.head(xdmp.hostStatus(hostId)).toObject();
 
   hosts.push({
     "hostname":                  xdmp.hostName(hostId),
-    "cpus":                      getVal(s, "cpus"),
-    "cores":                     getVal(s, "cores"),
-    "memory-system-total-mb":    getVal(s, "memory-system-total"),
-    "memory-system-free-mb":     getVal(s, "memory-system-free"),
-    "memory-system-pagein-rate": getVal(s, "memory-system-pagein-rate"),
-    "memory-system-pageout-rate":getVal(s, "memory-system-pageout-rate"),
-    "memory-system-swapin-rate": getVal(s, "memory-system-swapin-rate"),
-    "memory-system-swapout-rate":getVal(s, "memory-system-swapout-rate"),
-    "memory-process-size-mb":    getVal(s, "memory-process-size"),
-    "memory-process-rss-mb":     getVal(s, "memory-process-rss"),
-    "memory-process-anon-mb":    getVal(s, "memory-process-anon"),
-    "memory-process-rss-hwm-mb": getVal(s, "memory-process-rss-hwm"),
-    "memory-process-swap-mb":    getVal(s, "memory-process-swap-size"),
-    "memory-size-mb":            getVal(s, "memory-size"),
-    "memory-cache-size-mb":      getVal(s, "memory-cache-size"),
-    "memory-forest-size-mb":     getVal(s, "memory-forest-size"),
-    "memory-file-size-mb":       getVal(s, "memory-file-size"),
-    "host-size-mb":              getVal(s, "host-size"),
-    "memory-join-size-mb":       getVal(s, "memory-join-size"),
-    "memory-unclosed-size-mb":   getVal(s, "memory-unclosed-size"),
-    "memory-registry-size-mb":   getVal(s, "memory-registry-size"),
-    "host-large-data-size-mb":   getVal(s, "host-large-data-size"),
-    "log-device-space-mb":       getVal(s, "log-device-space"),
-    "data-dir-space-mb":         getVal(s, "data-dir-space")
+    "cpus":                      hs.cpus || 0,
+    "cores":                     hs.cores || 0,
+    "memory-system-total-mb":    hs.memorySystemTotal || 0,
+    "memory-system-free-mb":     hs.memorySystemFree || 0,
+    "memory-system-pagein-rate": hs.memorySystemPageinRate || 0,
+    "memory-system-pageout-rate":hs.memorySystemPageoutRate || 0,
+    "memory-system-swapin-rate": hs.memorySystemSwapinRate || 0,
+    "memory-system-swapout-rate":hs.memorySystemSwapoutRate || 0,
+    "memory-process-size-mb":    hs.memoryProcessSize || 0,
+    "memory-process-rss-mb":     hs.memoryProcessRss || 0,
+    "memory-process-anon-mb":    hs.memoryProcessAnon || 0,
+    "memory-process-rss-hwm-mb": hs.memoryProcessRssHwm || 0,
+    "memory-process-swap-mb":    hs.memoryProcessSwapSize || 0,
+    "memory-size-mb":            hs.memorySize || 0,
+    "memory-cache-size-mb":      hs.memoryCacheSize || 0,
+    "memory-forest-size-mb":     hs.memoryForestSize || 0,
+    "memory-file-size-mb":       hs.memoryFileSize || 0,
+    "host-size-mb":              hs.hostSize || 0,
+    "memory-join-size-mb":       hs.memoryJoinSize || 0,
+    "memory-unclosed-size-mb":   hs.memoryUnclosedSize || 0,
+    "memory-registry-size-mb":   hs.memoryRegistrySize || 0,
+    "host-large-data-size-mb":   hs.hostLargeDataSize || 0,
+    "log-device-space-mb":       hs.logDeviceSpace || 0,
+    "data-dir-space-mb":         hs.dataDirSpace || 0
   });
 }
 
-// ── 3. Database status (via Management API internal) ─────────────────
-var dbForests = xdmp.databaseForests(db).toArray();
+// ── 3. Database status ───────────────────────────────────────────────
+var dbForests = Array.from(xdmp.databaseForests(db));
 var totalDataSizeMb = 0;
 var totalInMemSizeMb = 0;
 var totalLargeDataMb = 0;
@@ -120,63 +111,50 @@ var leastRemainingMb = Infinity;
 var mergeCount = 0;
 
 // ── 4. Forest details ────────────────────────────────────────────────
+// xdmp.forestCounts() and xdmp.forestStatus() also return JSON ObjectNodes.
 var forests = [];
 for (var fi = 0; fi < dbForests.length; fi++) {
   var fid = dbForests[fi];
-  var fc = fn.head(xdmp.forestCounts(fid));
-  var fs = fn.head(xdmp.forestStatus(fid));
+  var fcObj = fn.head(xdmp.forestCounts(fid)).toObject();
+  var fsObj = fn.head(xdmp.forestStatus(fid)).toObject();
 
-  var getValFromNode = function(node, localName) {
-    var seq = node.xpath("//*[local-name()='" + localName + "']/data(.)");
-    var arr = seq.toArray();
-    return arr.length > 0 ? Number(arr[0]) : 0;
-  };
+  var docCount = fcObj.documentCount || 0;
 
-  var docCount = getValFromNode(fc, "document-count");
-
-  // Fragment counts are under stands-counts/stand-counts
-  var standCountsNodes = fc.xpath("//*[local-name()='stands-counts']/*[local-name()='stand-counts']");
+  // Fragment counts are under standsCounts[] (camelCase array)
   var activeCount = 0, deletedCount = 0, nascentCount = 0;
-  var scArr = standCountsNodes.toArray();
-  for (var sci = 0; sci < scArr.length; sci++) {
-    var scNode = scArr[sci];
-    var getScVal = function(n, ln) {
-      var s2 = n.xpath("*[local-name()='" + ln + "']/data(.)");
-      var a2 = s2.toArray();
-      return a2.length > 0 ? Number(a2[0]) : 0;
-    };
-    activeCount  += getScVal(scNode, "active-fragment-count");
-    deletedCount += getScVal(scNode, "deleted-fragment-count");
-    nascentCount += getScVal(scNode, "nascent-fragment-count");
+  var standsCounts = fcObj.standsCounts || [];
+  if (!Array.isArray(standsCounts)) standsCounts = [standsCounts];
+  for (var sci = 0; sci < standsCounts.length; sci++) {
+    var sc = standsCounts[sci];
+    activeCount  += sc.activeFragmentCount  || 0;
+    deletedCount += sc.deletedFragmentCount || 0;
+    nascentCount += sc.nascentFragmentCount || 0;
   }
 
-  // Stand info from forest-status
-  var standNodes = fs.xpath("//*[local-name()='stands']/*[local-name()='stand']");
-  var standArr2 = standNodes.toArray();
-  var standCount = standArr2.length;
+  // Stand info from forest-status: stands[] array with diskSize, memorySize
+  var stands = fsObj.stands || [];
+  if (!Array.isArray(stands)) stands = [stands];
+  var standCount = stands.length;
   var diskMb = 0, memMb = 0;
-  for (var si = 0; si < standArr2.length; si++) {
-    var standNode = standArr2[si];
-    var getDiskMem = function(n, ln) {
-      var s3 = n.xpath("*[local-name()='" + ln + "']/data(.)");
-      var a3 = s3.toArray();
-      return a3.length > 0 ? Number(a3[0]) : 0;
-    };
-    diskMb += getDiskMem(standNode, "disk-size");
-    memMb  += getDiskMem(standNode, "memory-size");
+  for (var si = 0; si < stands.length; si++) {
+    diskMb += stands[si].diskSize   || 0;
+    memMb  += stands[si].memorySize || 0;
   }
 
   totalDataSizeMb += diskMb;
   totalInMemSizeMb += memMb;
 
   // Device space from forest status
-  var fDeviceSpace = getValFromNode(fs, "device-space");
+  var fDeviceSpace = fsObj.deviceSpace || 0;
   if (fDeviceSpace > 0) {
     deviceSpaceMb = Math.max(deviceSpaceMb, fDeviceSpace);
     leastRemainingMb = Math.min(leastRemainingMb, fDeviceSpace);
   }
 
-  mergeCount += getValFromNode(fs, "merge-count");
+  // Merge count from merges array
+  var merges = fsObj.merges || [];
+  if (!Array.isArray(merges)) merges = [merges];
+  mergeCount += merges.length;
 
   forests.push({
     "forest-name":           xdmp.forestName(fid),
@@ -226,17 +204,17 @@ var rangeFieldIndexes = [];
 try { rangeFieldIndexes = admin.databaseGetRangeFieldIndexes(config, db); } catch(e) {}
 
 var boolChecks = {
-  "word-searches":                   function() { return admin.databaseGetWordSearches(config, db); },
-  "fast-phrase-searches":            function() { return admin.databaseGetFastPhraseSearches(config, db); },
-  "triple-index":                    function() { return admin.databaseGetTripleIndex(config, db); },
-  "fast-case-sensitive-searches":    function() { return admin.databaseGetFastCaseSensitiveSearches(config, db); },
+  "word-searches":                     function() { return admin.databaseGetWordSearches(config, db); },
+  "fast-phrase-searches":              function() { return admin.databaseGetFastPhraseSearches(config, db); },
+  "triple-index":                      function() { return admin.databaseGetTripleIndex(config, db); },
+  "fast-case-sensitive-searches":      function() { return admin.databaseGetFastCaseSensitiveSearches(config, db); },
   "fast-diacritic-sensitive-searches": function() { return admin.databaseGetFastDiacriticSensitiveSearches(config, db); },
-  "fast-element-word-searches":      function() { return admin.databaseGetFastElementWordSearches(config, db); },
-  "fast-element-phrase-searches":    function() { return admin.databaseGetFastElementPhraseSearches(config, db); },
-  "uri-lexicon":                     function() { return admin.databaseGetUriLexicon(config, db); },
-  "collection-lexicon":              function() { return admin.databaseGetCollectionLexicon(config, db); },
-  "trailing-wildcard-searches":      function() { return admin.databaseGetTrailingWildcardSearches(config, db); },
-  "three-character-searches":        function() { return admin.databaseGetThreeCharacterSearches(config, db); }
+  "fast-element-word-searches":        function() { return admin.databaseGetFastElementWordSearches(config, db); },
+  "fast-element-phrase-searches":      function() { return admin.databaseGetFastElementPhraseSearches(config, db); },
+  "uri-lexicon":                       function() { return admin.databaseGetUriLexicon(config, db); },
+  "collection-lexicon":                function() { return admin.databaseGetCollectionLexicon(config, db); },
+  "trailing-wildcard-searches":        function() { return admin.databaseGetTrailingWildcardSearches(config, db); },
+  "three-character-searches":          function() { return admin.databaseGetThreeCharacterSearches(config, db); }
 };
 var enabledBools = 0;
 Object.keys(boolChecks).forEach(function(key) {
@@ -269,15 +247,15 @@ try {
     });
   });
 
-  var statuses = xdmp.forestStatus(xdmp.databaseForests(db), "memoryDetail").toArray();
+  var statuses = Array.from(xdmp.forestStatus(xdmp.databaseForests(db), "memoryDetail"));
   var indexTotals = {};
   var standSummaries = [];
 
   statuses.forEach(function(statusNode) {
     var sObj = statusNode.toObject();
-    var stands = sObj.stands;
-    if (!stands) return;
-    var standList = Array.isArray(stands) ? stands : [stands];
+    var sStands = sObj.stands;
+    if (!sStands) return;
+    var standList = Array.isArray(sStands) ? sStands : [sStands];
     standList.forEach(function(stand) {
       if (stand.memorySummary) {
         standSummaries.push({
@@ -302,7 +280,7 @@ try {
   });
 
   var report = allIndexes.map(function(def) {
-    var totals = indexTotals[String(def.indexId)] || { memBytes: 0, diskBytes: 0 };
+    var t = indexTotals[String(def.indexId)] || { memBytes: 0, diskBytes: 0 };
     return {
       indexType:        def.indexType,
       localname:        def.localname || null,
@@ -310,8 +288,8 @@ try {
       scalarType:       def.scalarType || null,
       pathExpression:   def.pathExpression || null,
       indexId:          def.indexId,
-      totalMemoryBytes: totals.memBytes,
-      totalOnDiskBytes: totals.diskBytes
+      totalMemoryBytes: t.memBytes,
+      totalOnDiskBytes: t.diskBytes
     };
   });
 
