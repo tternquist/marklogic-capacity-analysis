@@ -2543,8 +2543,18 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
             with lock:
                 if db_filter and db_filter in latest_snapshots:
                     snap = latest_snapshots[db_filter]
-                elif latest_snapshots:
+                elif not db_filter and latest_snapshots:
                     snap = list(latest_snapshots.values())[0]
+                elif db_filter:
+                    # Collect on-demand for a database we aren't
+                    # actively monitoring
+                    try:
+                        snap = collect_snapshot(client, db_filter)
+                        latest_snapshots[db_filter] = snap
+                    except Exception as e:
+                        self._respond(500, "application/json",
+                                      json.dumps({"error": str(e)}))
+                        return
                 else:
                     self._respond(503, "application/json",
                                   '{"error":"No data collected yet"}')
@@ -2592,6 +2602,10 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                           json.dumps(points, indent=2, default=str))
 
         def _serve_json_databases(self):
+            _SYSTEM_DBS = {
+                "App-Services", "Extensions", "Last-Login", "Meters",
+                "Modules", "Schemas", "Security", "Triggers",
+            }
             db_names = set(latest_snapshots.keys())
             # Fetch all databases from the cluster
             try:
@@ -2608,8 +2622,15 @@ def run_service(client, databases, interval_sec, port, otlp_endpoint=None,
                 db_name = s.get("database")
                 if db_name:
                     db_names.add(db_name)
+            # Filter out system databases
+            db_names -= _SYSTEM_DBS
+            # Ensure Documents is first if present
+            result = sorted(db_names)
+            if "Documents" in result:
+                result.remove("Documents")
+                result.insert(0, "Documents")
             self._respond(200, "application/json",
-                          json.dumps(sorted(db_names), default=str))
+                          json.dumps(result, default=str))
 
         def _serve_json_snapshot_file(self, filename):
             """Serve full snapshot JSON for a specific file."""
