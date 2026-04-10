@@ -890,8 +890,23 @@ def report_index_memory(client, database):
                 print(f"        Memory: {mem_str:>12}    Disk: {disk_str:>12}")
 
         print()
-        kv("Total index memory",  fmt_mb(grand_mem / (1024 * 1024)))
-        kv("Total index on-disk", fmt_mb(grand_disk / (1024 * 1024)))
+        kv("Per-index cached memory", fmt_mb(grand_mem / (1024 * 1024)))
+        kv("Per-index on-disk",       fmt_mb(grand_disk / (1024 * 1024)))
+
+        # The per-index memory from memoryDetail only shows data loaded into
+        # the list cache — not total resident range index pages. The stand-level
+        # aggregate is the real memory picture.
+        total_range_bytes = sum(
+            ss.get("summary", {}).get("rangeIndexesBytes", 0)
+            for ss in stand_summaries
+        )
+        if total_range_bytes > 0:
+            print()
+            kv("Total range index memory (all indexes, stand-level)",
+               color(fmt_mb(total_range_bytes / (1024 * 1024)), BOLD))
+            print(f"      {color('Note:', DIM)} Per-index values above reflect only cache-warmed data.")
+            print(f"      {color('The stand-level total includes all resident range index pages.', DIM)}")
+            print(f"      {color('Use --index-impact for measured per-index costs.', DIM)}")
 
     except Exception as e:
         print(f"    Could not retrieve index memory usage: {e}")
@@ -2304,22 +2319,18 @@ def snapshot_to_prometheus(snap):
     # ── Per-index memory (ML 11+) ──────────────────────────────────
     idx_mem = snap.get("index_memory") or {}
     for idx in idx_mem.get("indexes", []):
-        mem = idx.get("totalMemoryBytes", 0)
-        disk_b = idx.get("totalOnDiskBytes", 0)
-        if not mem and not disk_b:
-            continue
+        mem = idx.get("totalMemoryBytes", 0) or 0
+        disk_b = idx.get("totalOnDiskBytes", 0) or 0
         name = idx.get("localname") or idx.get("pathExpression") or idx.get("indexType", "unknown")
         stype = idx.get("scalarType") or ""
         idx_label = f"{name}({stype})" if stype else name
         i_labels = {"database": db, "index": idx_label}
-        if mem:
-            gauge("mlca_index_memory_bytes",
-                  "Per-index memory in bytes",
-                  mem, i_labels)
-        if disk_b:
-            gauge("mlca_index_disk_bytes",
-                  "Per-index on-disk size in bytes",
-                  disk_b, i_labels)
+        gauge("mlca_index_memory_bytes",
+              "Per-index memory in bytes",
+              mem, i_labels)
+        gauge("mlca_index_disk_bytes",
+              "Per-index on-disk size in bytes",
+              disk_b, i_labels)
 
     # ── Stand memory components ────────────────────────────────────
     stand_summaries = idx_mem.get("standSummaries", [])
@@ -2756,7 +2767,7 @@ async function refresh() {
 
     // Index table
     const im = snap.index_memory || {};
-    const indexes = (im.indexes || []).filter(i => (i.totalMemoryBytes||0) > 0 || (i.totalOnDiskBytes||0) > 0);
+    const indexes = im.indexes || [];
     if (indexes.length > 0) {
       indexes.sort((a,b) => (b.totalMemoryBytes||0) - (a.totalMemoryBytes||0));
       let tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
@@ -2764,11 +2775,29 @@ async function refresh() {
         const name = i.localname || i.pathExpression || i.indexType || '?';
         const mem = i.totalMemoryBytes || 0;
         const disk = i.totalOnDiskBytes || 0;
+        const memStr = mem > 0 ? fmt(mem/1048576) : '<span style="color:#484f58">not cached</span>';
+        const diskStr = disk > 0 ? fmt(disk/1048576) : '<span style="color:#484f58">not cached</span>';
         tbl += '<tr><td>' + name + '</td><td>' + (i.scalarType||i.indexType||'') +
-               '</td><td class="num">' + fmt(mem/1048576) +
-               '</td><td class="num">' + fmt(disk/1048576) + '</td></tr>';
+               '</td><td class="num">' + memStr +
+               '</td><td class="num">' + diskStr + '</td></tr>';
       });
       tbl += '</table>';
+
+      // Show stand-level range index total (more accurate than per-index cache data)
+      const sums = (im.standSummaries || []);
+      if (sums.length > 0) {
+        let totalRange = 0;
+        sums.forEach(s => { totalRange += (s.summary||{}).rangeIndexesBytes || 0; });
+        if (totalRange > 0) {
+          tbl += '<div style="margin-top:12px;padding:8px;background:#21262d;border-radius:4px">' +
+            '<span class="metric-key">Total range index memory (stand-level): </span>' +
+            '<span class="metric-val" style="color:#58a6ff">' + fmt(totalRange/1048576) + '</span>' +
+            '<div style="color:#484f58;font-size:12px;margin-top:4px">' +
+            'Per-index values show cache-warmed data only. Stand-level total includes all resident pages. ' +
+            'Use --index-impact for measured per-index costs.</div></div>';
+        }
+      }
+
       document.getElementById('indexes').innerHTML = tbl;
     } else {
       document.getElementById('indexes').innerHTML = '<div class="loading">No index memory data available</div>';
