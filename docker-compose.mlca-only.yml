@@ -1,0 +1,41 @@
+# MLCA Service Only (external MarkLogic, Prometheus, and Grafana)
+#
+# Just the MLCA service — you point your existing Prometheus at it
+# and import the dashboard into your existing Grafana.
+#
+# Usage:
+#   MLCA_HOST=ml.example.com MLCA_PASSWORD=secret \
+#     docker compose -f docker-compose.mlca-only.yml up -d
+#
+# Then add to your prometheus.yml:
+#   - job_name: 'mlca'
+#     static_configs:
+#       - targets: ['mlca-host:9090']
+#
+# Access:
+#   MLCA UI:    http://localhost:9090
+#   /metrics:   http://localhost:9090/metrics
+
+services:
+  mlca:
+    build: .
+    container_name: mlca-service
+    ports:
+      - "${MLCA_SERVE_PORT:-9090}:9090"
+    environment:
+      MLCA_HOST: ${MLCA_HOST:-localhost}
+      MLCA_PORT: ${MLCA_PORT:-8002}
+      MLCA_USER: ${MLCA_USER:-admin}
+      MLCA_PASSWORD: ${MLCA_PASSWORD:-admin}
+      MLCA_AUTH_TYPE: ${MLCA_AUTH_TYPE:-digest}
+      MLCA_DATABASE: ${MLCA_DATABASE:-Documents}
+      MLCA_INTERVAL: ${MLCA_INTERVAL:-15m}
+      MLCA_SERVE_PORT: "9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - mlca_data:/data/.ml-capacity
+    restart: unless-stopped
+
+volumes:
+  mlca_data:

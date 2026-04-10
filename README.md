@@ -354,17 +354,255 @@ The test includes safety stops for swap detection, memory threshold breach, and
 low system free memory. It takes before/after snapshots and reports actual vs
 projected per-document costs.
 
+## Service Mode and Prometheus Metrics
+
+MLCA can run as a persistent service that collects metrics on a schedule and
+exposes them for Prometheus scraping, while also serving a lightweight web UI.
+
+All existing CLI flags continue to work — `--serve` is additive.
+
+### Starting the Service
+
+```bash
+# Service mode — collects every 15 minutes, serves on port 9090
+python3 ml_capacity.py --host ml.example.com --user admin --password secret \
+    --serve --interval 15m --serve-port 9090
+
+# One-shot Prometheus output (no service, useful for cron/textfile collector)
+python3 ml_capacity.py --host ml.example.com --user admin --password secret \
+    --format prometheus
+
+# One-shot JSON output
+python3 ml_capacity.py --host ml.example.com --user admin --password secret \
+    --format json
+```
+
+### Service Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `http://localhost:9090/` | Web UI — memory hero metrics, gauges, host breakdown, index table |
+| `http://localhost:9090/metrics` | Prometheus scrape endpoint (30+ metrics) |
+| `http://localhost:9090/api/snapshot` | Latest snapshot as JSON |
+| `http://localhost:9090/api/snapshots` | All snapshot summaries as JSON |
+| `http://localhost:9090/api/trend` | Time-series data for charting |
+| `http://localhost:9090/health` | Health check (`{"status":"ok"}`) |
+
+### Prometheus Metrics
+
+All metrics use the `mlca_` prefix with labels for `database` and `host`:
+
+```
+# Memory (most important for capacity planning)
+mlca_memory_headroom_mb{database="Documents"}        5730
+mlca_memory_ceiling_mb{database="Documents"}         12493
+mlca_memory_utilization_ratio{database="Documents"}  0.54
+mlca_host_forest_mb{host="ml-1.example.com"}         518
+mlca_host_rss_mb{host="ml-1.example.com"}            1285
+mlca_host_swap_mb{host="ml-1.example.com"}           0
+mlca_host_cache_mb{host="ml-1.example.com"}          5120
+
+# Documents and fragments
+mlca_documents_total{database="Documents"}           162598
+mlca_fragmentation_ratio{database="Documents"}       0.0025
+
+# Disk
+mlca_forest_disk_mb{database="Documents"}            334
+mlca_disk_remaining_mb{database="Documents"}         142040
+
+# Per-index memory (ML 11+)
+mlca_index_memory_bytes{database="Documents",index="uriLexicon"}  4388288
+
+# Stand memory components
+mlca_stand_range_indexes_bytes{database="Documents"} 31798620
+```
+
+### Optional OTLP Push
+
+Push metrics to any OpenTelemetry Collector without additional dependencies:
+
+```bash
+python3 ml_capacity.py --host ml.example.com --user admin --password secret \
+    --serve --otlp-endpoint http://otel-collector:4318
+```
+
+## Grafana Integration
+
+MLCA ships with a pre-built Grafana dashboard and the configuration needed
+to get from zero to a working monitoring stack in minutes.
+
+### Docker Compose Options
+
+Three compose files for different environments:
+
+| File | What it starts | When to use |
+|---|---|---|
+| `docker-compose.mlca-only.yml` | MLCA only | You already have Prometheus + Grafana |
+| `docker-compose.yml` | MLCA + Prometheus + Grafana | You have MarkLogic but no monitoring stack |
+| `docker-compose.monitoring.yml` | Everything (ML + MLCA + Prometheus + Grafana) | Self-contained test/demo environment |
+
+All compose files accept the same environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `MLCA_HOST` | `localhost` | MarkLogic Management API host |
+| `MLCA_PORT` | `8002` | Management API port |
+| `MLCA_USER` | `admin` | MarkLogic username |
+| `MLCA_PASSWORD` | `admin` | MarkLogic password |
+| `MLCA_AUTH_TYPE` | `digest` | `digest` or `basic` |
+| `MLCA_DATABASE` | `Documents` | Database to monitor |
+| `MLCA_INTERVAL` | `15m` | Collection interval (`5m`, `15m`, `1h`) |
+| `GRAFANA_PASSWORD` | `admin` | Grafana admin password |
+
+### Option 1: MLCA Only (existing Prometheus + Grafana)
+
+If you already have a Prometheus/Grafana stack, just start the MLCA service
+and point your existing Prometheus at it:
+
+```bash
+MLCA_HOST=ml.example.com MLCA_PASSWORD=secret \
+  docker compose -f docker-compose.mlca-only.yml up -d
+```
+
+Then add the scrape target to your `prometheus.yml` (see Step 2 below) and
+import the dashboard into Grafana (see Step 3).
+
+### Option 2: MLCA + Prometheus + Grafana (existing MarkLogic)
+
+The full monitoring stack connecting to an existing MarkLogic cluster.
+Grafana dashboard is auto-provisioned.
+
+```bash
+MLCA_HOST=ml.example.com MLCA_PASSWORD=secret docker compose up -d
+
+# If MarkLogic is running on the same Docker host:
+MLCA_HOST=host.docker.internal docker compose up -d
+```
+
+Access:
+- **Grafana**: http://localhost:3000 (login: admin / admin)
+- **MLCA Web UI**: http://localhost:9090
+- **Prometheus**: http://localhost:9091
+
+The Grafana dashboard is auto-provisioned — no manual import needed. Open
+Grafana, go to Dashboards, and find "MLCA — MarkLogic Capacity Analysis"
+under the MarkLogic folder.
+
+To stop: `docker compose down` (add `-v` to also delete stored data).
+
+### Option 3: Full Stack Including MarkLogic (test/demo)
+
+Self-contained environment for testing or demos:
+
+```bash
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+Starts MarkLogic (ports 8000-8002), MLCA, Prometheus, and Grafana.
+
+### Manual Setup: Add MLCA to an Existing Prometheus/Grafana
+
+If you don't use Docker or want to run MLCA directly:
+
+**Step 1: Start the MLCA service**
+
+```bash
+# Run directly
+python3 ml_capacity.py --host ml.example.com --user admin --password secret \
+    --auth-type basic --serve --interval 15m --serve-port 9090
+
+# Or via Docker
+docker build -t mlca .
+docker run -d --name mlca -p 9090:9090 \
+    -e MLCA_HOST=ml.example.com \
+    -e MLCA_PASSWORD=secret \
+    -e MLCA_AUTH_TYPE=basic \
+    mlca
+```
+
+**Step 2: Add MLCA as a Prometheus scrape target**
+
+Add to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'mlca'
+    scrape_interval: 60s
+    static_configs:
+      - targets: ['mlca-host:9090']  # wherever MLCA is running
+```
+
+Reload Prometheus: `curl -X POST http://prometheus:9090/-/reload`
+
+Verify metrics appear: open Prometheus UI, query `mlca_documents_total`.
+
+**Step 3: Import the Grafana dashboard**
+
+1. In Grafana, go to **Dashboards → Import**
+2. Upload `monitoring/grafana/dashboards/mlca.json` (or paste its contents)
+3. Select your Prometheus data source
+4. Click **Import**
+
+### Option 3: Cron + Textfile Collector (no service needed)
+
+If you use Prometheus Node Exporter with the textfile collector, you can
+write Prometheus metrics to a file on a schedule — no MLCA service needed:
+
+```bash
+# Cron job: collect metrics every 15 minutes
+*/15 * * * * python3 /path/to/ml_capacity.py \
+    --host ml.example.com --user admin --password secret \
+    --auth-type basic --format prometheus --no-snapshot \
+    > /var/lib/node_exporter/textfile_collector/mlca.prom
+```
+
+The Node Exporter will pick up the file and expose the metrics at its
+own `/metrics` endpoint, which Prometheus already scrapes.
+
+### Grafana Dashboard Panels
+
+The pre-built dashboard includes:
+
+| Row | Panels |
+|---|---|
+| **Memory (hero)** | Memory headroom (stat), ceiling usage (gauge), documents (stat), fragmentation (stat), swap alert (stat) |
+| **Time Series** | Forest memory over time with ceiling line, RSS over time with ceiling line |
+| **Breakdown** | Memory component stacked bar (cache/base/forest/file), document growth, disk usage |
+| **Indexes** | Per-index memory table, stand memory component pie chart |
+
+**Recommended alerts** to configure in Grafana:
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Memory runway low | `mlca_memory_headroom_mb < 2048` | Warning |
+| Memory critical | `mlca_memory_headroom_mb < 512` | Critical |
+| Swap detected | `mlca_host_swap_mb > 0` | Critical |
+| High fragmentation | `mlca_fragmentation_ratio > 0.25` | Warning |
+| RSS near ceiling | `mlca_memory_utilization_ratio > 0.85` | Warning |
+
 ## File Structure
 
 ```
 ml-capacity/
-  ml_capacity.py        # Main capacity analyzer CLI
-  ml_capacity_test.py   # Scaling validation test (linear regression)
-  ml_capacity_stress.py # One-time stress test (load toward ceiling)
-  .ml-capacity/         # Snapshot storage (gitignored)
-    20260410T120000_Documents.json
-    20260410T130000_Documents.json
-    ...
+  ml_capacity.py              # CLI + service mode (--serve)
+  ml_capacity_test.py         # Scaling validation test
+  ml_capacity_stress.py       # One-time stress test
+  Dockerfile                     # MLCA service container
+  docker-compose.mlca-only.yml   # MLCA only (existing Prometheus + Grafana)
+  docker-compose.yml             # MLCA + Prometheus + Grafana (existing ML)
+  docker-compose.monitoring.yml  # Full stack including MarkLogic
+  monitoring/
+    prometheus.yml            # Prometheus scrape config
+    grafana/
+      dashboards/
+        mlca.json             # Pre-built Grafana dashboard
+      provisioning/
+        dashboards.yml        # Auto-provision dashboard
+        datasources.yml       # Prometheus data source
+  test/
+    docker-compose.yml        # Test ML instance (4GB, for harness)
+    test_harness.py           # Memory convergence + index impact tests
+  .ml-capacity/               # Snapshot storage (gitignored)
   .gitignore
   README.md
 ```
