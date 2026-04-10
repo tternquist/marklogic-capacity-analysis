@@ -1362,6 +1362,29 @@ def extract_config_fingerprint(snap):
     }
 
 
+# Fields reported by the Management API in MB that can wobble +/-1
+# due to internal rounding (e.g. memory-cache-size reported as 5121
+# one call and 5120 the next despite no config change).
+_FUZZY_MB_FIELDS = frozenset({
+    "system_ram_mb", "ml_limit_mb", "cache_alloc_mb",
+})
+
+
+def _values_match(a, b, field_name=""):
+    """Compare two config values, with tolerance for known noisy MB fields.
+
+    Only fields in _FUZZY_MB_FIELDS get tolerance (0.5% or 2 MB).
+    All other fields (counts, strings, versions) use exact equality
+    so that e.g. an index count changing from 3 to 5 is always caught.
+    """
+    if a == b:
+        return True
+    if field_name in _FUZZY_MB_FIELDS and isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        abs_tol = max(2, abs(a) * 0.005)  # 0.5% or 2 MB, whichever is larger
+        return abs(a - b) <= abs_tol
+    return False
+
+
 def check_config_drift(snaps):
     """Compare configuration fingerprints across snapshots.
 
@@ -1382,7 +1405,7 @@ def check_config_drift(snaps):
         for key in baseline:
             if key == "hosts":
                 continue
-            if baseline[key] != current.get(key):
+            if not _values_match(baseline[key], current.get(key), key):
                 drift.append((key, baseline[key], current.get(key), i))
 
         # Compare per-host config
@@ -1393,7 +1416,7 @@ def check_config_drift(snaps):
         else:
             for bh, ch in zip(baseline.get("hosts", []), current.get("hosts", [])):
                 for hk in bh:
-                    if bh[hk] != ch.get(hk):
+                    if not _values_match(bh[hk], ch.get(hk), hk):
                         host = bh.get("hostname", "?")
                         drift.append((f"host[{host}].{hk}", bh[hk], ch.get(hk), i))
 
