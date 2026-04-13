@@ -600,8 +600,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 <div class="chart-tooltip" id="tooltip"></div>
 
 <script>
-var selectedDb = null;
-var activeTab = 'dashboard';
+let selectedDb = null;
+let activeTab = 'dashboard';
 
 function fmt(mb) {
   if (mb == null) return 'N/A';
@@ -636,11 +636,11 @@ document.querySelectorAll('.tab').forEach(function(tab) {
 // Database selector
 async function loadDatabases() {
   try {
-    var dbs = await (await fetch('/api/databases')).json();
-    var sel = document.getElementById('dbSelect');
+    const dbs = await (await fetch('/api/databases')).json();
+    const sel = document.getElementById('dbSelect');
     sel.innerHTML = '';
     dbs.forEach(function(db) {
-      var opt = document.createElement('option');
+      const opt = document.createElement('option');
       opt.value = db; opt.textContent = db;
       if (db === selectedDb) opt.selected = true;
       sel.appendChild(opt);
@@ -656,26 +656,26 @@ document.getElementById('dbSelect').addEventListener('change', function() {
 // Dashboard
 async function refreshDashboard() {
   try {
-    var snap = await (await fetch('/api/snapshot' + dbParam())).json();
+    const snap = await (await fetch('/api/snapshot' + dbParam())).json();
     if (snap.error) { document.getElementById('subtitle').textContent = snap.error; return; }
-    var t = snap.totals || {};
-    var db = snap.database || '?';
-    var ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
+    const t = snap.totals || {};
+    const db = snap.database || '?';
+    const ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
     document.getElementById('subtitle').textContent = db + ' \\u2014 ' + ts;
 
-    var sysTot = t.system_total_mb || 0;
-    var cache = t.host_cache_mb || 0, base = t.host_base_mb || 0;
-    var file = t.host_file_mb || 0, forest = t.host_forest_mb || 0;
-    var fixed = cache + base + file;
-    var ceiling = sysTot * 0.8;
-    var headroom = ceiling - fixed - forest;
-    var memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
+    const sysTot = t.system_total_mb || 0;
+    const cache = t.host_cache_mb || 0, base = t.host_base_mb || 0;
+    const file = t.host_file_mb || 0, forest = t.host_forest_mb || 0;
+    const fixed = cache + base + file;
+    const ceiling = sysTot * 0.8;
+    const headroom = ceiling - fixed - forest;
+    const memPct = ceiling > 0 ? ((fixed + forest) / ceiling * 100) : 0;
 
     // Severity helpers for hero cards
-    var memCard = memPct >= 90 ? 'crit' : memPct >= 70 ? 'warn' : '';
-    var headroomCard = headroom < 512 ? 'crit' : headroom < 1024 ? 'warn' : '';
+    const memCard = memPct >= 90 ? 'crit' : memPct >= 70 ? 'warn' : '';
+    const headroomCard = headroom < 512 ? 'crit' : headroom < 1024 ? 'warn' : '';
 
-    var heroHTML = '';
+    let heroHTML = '';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
                 fmtNum(t.documents) + '</div><div class="hero-label">Documents</div></div>';
     heroHTML += '<div class="hero-card"><div class="hero-value">' +
@@ -688,8 +688,8 @@ async function refreshDashboard() {
     document.getElementById('hero').innerHTML = heroHTML;
 
     // Alert banner
-    var banner = document.getElementById('alert-banner');
-    var alertText = document.getElementById('alert-text');
+    const banner = document.getElementById('alert-banner');
+    const alertText = document.getElementById('alert-text');
     if (headroom <= 0) {
       banner.className = 'alert-banner';
       alertText.textContent = 'CRITICAL: Memory ceiling exceeded — ' + db +
@@ -709,9 +709,9 @@ async function refreshDashboard() {
       banner.style.display = 'none';
     }
 
-    var grid = '';
+    let grid = '';
     // Identify dominant growth driver (base_mb typically grows fastest with data)
-    var baseNote = base > forest * 1.5 ? ' \u2605 primary driver' : '';
+    const baseNote = base > forest * 1.5 ? ' \u2605 primary driver' : '';
     grid += '<div class="card"><div class="card-title">Memory Breakdown</div>' +
       metric('Cache (list+tree)', fmt(cache)) +
       metric('Forest stands', fmt(forest)) +
@@ -722,11 +722,11 @@ async function refreshDashboard() {
       metric('Headroom', fmt(headroom), headroom < 512 ? 'crit' : headroom < 1024 ? 'warn' : 'good') +
     '</div>';
 
-    var hosts = snap.hosts || [];
+    const hosts = snap.hosts || [];
     if (hosts.length > 0) {
-      var h = hosts[0];
-      var rss = h['memory-process-rss-mb'] || 0;
-      var swap = h['memory-process-swap-mb'] || 0;
+      const h = hosts[0];
+      const rss = h['memory-process-rss-mb'] || 0;
+      const swap = h['memory-process-swap-mb'] || 0;
       grid += '<div class="card"><div class="card-title">Host: ' + (h.hostname||'?') + '</div>' +
         metric('System RAM', fmt(h['memory-system-total-mb'])) +
         metric('ML RSS', fmt(rss)) +
@@ -736,11 +736,11 @@ async function refreshDashboard() {
       '</div>';
     }
 
-    var dbStat = snap.database_status || {};
-    var diskUsed = t.forest_disk_mb || 0;
-    var diskRemaining = Number(dbStat.least_remaining_mb || 0);
-    var diskTotal = diskUsed + diskRemaining;
-    var diskPct = diskTotal > 0 ? (diskUsed / diskTotal * 100) : 0;
+    const dbStat = snap.database_status || {};
+    const diskUsed = t.forest_disk_mb || 0;
+    const diskRemaining = Number(dbStat.least_remaining_mb || 0);
+    const diskTotal = diskUsed + diskRemaining;
+    const diskPct = diskTotal > 0 ? (diskUsed / diskTotal * 100) : 0;
     grid += '<div class="card"><div class="card-title">Disk</div>' +
       metric('Data on disk', fmt(diskUsed)) +
       metric('Remaining', fmt(diskRemaining)) +
@@ -748,9 +748,9 @@ async function refreshDashboard() {
       (t.documents > 0 ? metric('Bytes/doc', Math.round(diskUsed*1048576/t.documents).toLocaleString()) : '') +
     '</div>';
 
-    var active = t.active_fragments || 0, deleted = t.deleted_fragments || 0;
-    var fragTotal = active + deleted;
-    var fragPct = fragTotal > 0 ? (deleted/fragTotal*100) : 0;
+    const active = t.active_fragments || 0, deleted = t.deleted_fragments || 0;
+    const fragTotal = active + deleted;
+    const fragPct = fragTotal > 0 ? (deleted/fragTotal*100) : 0;
     grid += '<div class="card"><div class="card-title">Fragments</div>' +
       metric('Active', fmtNum(active)) +
       metric('Deleted', fmtNum(deleted), deleted > 0 ? 'warn' : '') +
@@ -760,26 +760,26 @@ async function refreshDashboard() {
     document.getElementById('grid').innerHTML = grid;
 
     // Index table
-    var im = snap.index_memory || {};
-    var indexes = im.indexes || [];
+    const im = snap.index_memory || {};
+    const indexes = im.indexes || [];
     if (indexes.length > 0) {
       indexes.sort(function(a,b) { return (b.totalMemoryBytes||0) - (a.totalMemoryBytes||0); });
-      var tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
+      let tbl = '<table><tr><th>Index</th><th>Type</th><th>Memory</th><th>Disk</th></tr>';
       indexes.forEach(function(i) {
-        var name = i.localname || i.pathExpression || i.indexType || '?';
-        var mem = i.totalMemoryBytes || 0;
-        var disk = i.totalOnDiskBytes || 0;
-        var memStr = mem > 0 ? fmt(mem/1048576) : '<span style="color:#484f58">not cached</span>';
-        var diskStr = disk > 0 ? fmt(disk/1048576) : '<span style="color:#484f58">not cached</span>';
+        const name = i.localname || i.pathExpression || i.indexType || '?';
+        const mem = i.totalMemoryBytes || 0;
+        const disk = i.totalOnDiskBytes || 0;
+        const memStr = mem > 0 ? fmt(mem/1048576) : '<span style="color:#484f58">not cached</span>';
+        const diskStr = disk > 0 ? fmt(disk/1048576) : '<span style="color:#484f58">not cached</span>';
         tbl += '<tr><td>' + name + '</td><td>' + (i.scalarType||i.indexType||'') +
                '</td><td class="num">' + memStr +
                '</td><td class="num">' + diskStr + '</td></tr>';
       });
       tbl += '</table>';
 
-      var sums = (im.standSummaries || []);
+      const sums = (im.standSummaries || []);
       if (sums.length > 0) {
-        var totalRange = 0;
+        const totalRange = 0;
         sums.forEach(function(s) { totalRange += (s.summary||{}).rangeIndexesBytes || 0; });
         if (totalRange > 0) {
           tbl += '<div style="margin-top:12px;padding:8px;background:#21262d;border-radius:4px">' +
@@ -803,43 +803,43 @@ async function refreshDashboard() {
     // uses marginal cost from recent snapshots (amortisation means average
     // cost drops as the collection grows — marginal is more predictive).
     try {
-      var trend = await (await fetch('/api/trend' + dbParam())).json();
-      var projSec = document.getElementById('projections-section');
+      const trend = await (await fetch('/api/trend' + dbParam())).json();
+      const projSec = document.getElementById('projections-section');
 
       // ── Improved dedup: for each run of identical doc counts, keep first
       // and last snapshot. "First" captures the moment loading stopped;
       // "last" captures the settled (post-merge) state. This preserves both
       // the inflection point and the steady-state value for regression quality.
-      var dedupTrend = [];
-      var i = 0;
+      const dedupTrend = [];
+      let i = 0;
       while (i < trend.length) {
-        var runStart = i;
+        const runStart = i;
         while (i < trend.length && trend[i].documents === trend[runStart].documents) i++;
         dedupTrend.push(trend[runStart]);
         if (i - 1 > runStart) dedupTrend.push(trend[i - 1]);
       }
-      var rawCount = trend.length;
+      const rawCount = trend.length;
       trend = dedupTrend;
 
       if (trend.length >= 3) {
-        var first = trend[0], last = trend[trend.length - 1];
-        var t0 = new Date(first.timestamp).getTime(), t1 = new Date(last.timestamp).getTime();
-        var spanDays = (t1 - t0) / 86400000;
+        const first = trend[0], last = trend[trend.length - 1];
+        const t0 = new Date(first.timestamp).getTime(), t1 = new Date(last.timestamp).getTime();
+        const spanDays = (t1 - t0) / 86400000;
 
         // Linear regression helper: returns {slope, intercept, r2}
         function linReg(xs, ys) {
-          var n = xs.length, sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0;
-          for (var i = 0; i < n; i++) {
+          const n = xs.length, sx = 0, sy = 0, sxy = 0, sx2 = 0, sy2 = 0;
+          for (let i = 0; i < n; i++) {
             sx += xs[i]; sy += ys[i]; sxy += xs[i]*ys[i];
             sx2 += xs[i]*xs[i]; sy2 += ys[i]*ys[i];
           }
-          var denom = n*sx2 - sx*sx;
+          const denom = n*sx2 - sx*sx;
           if (denom === 0) return { slope: 0, intercept: 0, r2: 0 };
-          var slope = (n*sxy - sx*sy) / denom;
-          var intercept = (sy - slope*sx) / n;
-          var ssRes = 0, ssTot = 0, yMean = sy/n;
-          for (var i = 0; i < n; i++) {
-            var yHat = slope*xs[i] + intercept;
+          const slope = (n*sxy - sx*sy) / denom;
+          const intercept = (sy - slope*sx) / n;
+          let ssRes = 0, ssTot = 0, yMean = sy/n;
+          for (let i = 0; i < n; i++) {
+            const yHat = slope*xs[i] + intercept;
             ssRes += (ys[i]-yHat)*(ys[i]-yHat);
             ssTot += (ys[i]-yMean)*(ys[i]-yMean);
           }
@@ -847,67 +847,67 @@ async function refreshDashboard() {
         }
 
         // Build regression inputs
-        var xDocs = trend.map(function(p) { return p.documents; });
-        var yDisk = trend.map(function(p) { return p.forest_disk_mb; });
-        var yForest = trend.map(function(p) { return p.host_forest_mb; });
+        const xDocs = trend.map(function(p) { return p.documents; });
+        const yDisk = trend.map(function(p) { return p.forest_disk_mb; });
+        const yForest = trend.map(function(p) { return p.host_forest_mb; });
         // Total non-cache memory = forest + base + file (all grow with data)
-        var yTotalMem = trend.map(function(p) {
+        const yTotalMem = trend.map(function(p) {
           return (p.host_forest_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
         });
 
         // ── Distinct doc levels (regression quality signal) ──
-        var distinctLevels = new Set(xDocs).size;
+        const distinctLevels = new Set(xDocs).size;
 
         // ── Forest spike detection: exclude mid-merge snapshots from regression ──
         // A merge spike occurs when forest_mb is substantially above the doc-level
         // expectation. We detect it by comparing each point to the overall trend:
         // sort forest values, use median as baseline, flag points > 1.5× median.
-        var sortedForest = yForest.slice().sort(function(a,b){return a-b;});
-        var medForest = sortedForest[Math.floor(sortedForest.length / 2)];
-        var spikeThreshold = medForest * 1.6;
-        var nonSpike = trend.filter(function(p) {
+        const sortedForest = yForest.slice().sort(function(a,b){return a-b;});
+        const medForest = sortedForest[Math.floor(sortedForest.length / 2)];
+        const spikeThreshold = medForest * 1.6;
+        const nonSpike = trend.filter(function(p) {
           return (p.host_forest_mb||0) <= spikeThreshold;
         });
-        var spikeCount = trend.length - nonSpike.length;
+        const spikeCount = trend.length - nonSpike.length;
         // Use spike-filtered set for regression if we still have enough points
-        var regPoints = nonSpike.length >= 3 ? nonSpike : trend;
-        var xDocsR = regPoints.map(function(p) { return p.documents; });
-        var yDiskR  = regPoints.map(function(p) { return p.forest_disk_mb; });
-        var yTotalMemR = regPoints.map(function(p) {
+        const regPoints = nonSpike.length >= 3 ? nonSpike : trend;
+        const xDocsR = regPoints.map(function(p) { return p.documents; });
+        const yDiskR  = regPoints.map(function(p) { return p.forest_disk_mb; });
+        const yTotalMemR = regPoints.map(function(p) {
           return (p.host_forest_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
         });
 
         // Regression: docs as x-axis (stable, monotonic, independent of loading rate)
-        var diskReg = linReg(xDocsR, yDiskR);
-        var totalMemReg = linReg(xDocsR, yTotalMemR);
+        const diskReg = linReg(xDocsR, yDiskR);
+        const totalMemReg = linReg(xDocsR, yTotalMemR);
 
         // Marginal cost per doc from regression slope
-        var marginalMemBytes = totalMemReg.slope * 1048576;  // MB/doc -> bytes/doc
-        var marginalDiskBytes = diskReg.slope * 1048576;
+        const marginalMemBytes = totalMemReg.slope * 1048576;  // MB/doc -> bytes/doc
+        const marginalDiskBytes = diskReg.slope * 1048576;
 
         // Time-based rates using regression on time
-        var xTimes = trend.map(function(p) { return (new Date(p.timestamp).getTime() - t0) / 86400000; });
-        var diskTimeReg = linReg(xTimes, yDisk);
-        var docsTimeReg = linReg(xTimes, xDocs);
-        var totalMemTimeReg = linReg(xTimes, yTotalMem);
+        const xTimes = trend.map(function(p) { return (new Date(p.timestamp).getTime() - t0) / 86400000; });
+        const diskTimeReg = linReg(xTimes, yDisk);
+        const docsTimeReg = linReg(xTimes, xDocs);
+        const totalMemTimeReg = linReg(xTimes, yTotalMem);
 
         // Current memory state
-        var curBase = last.host_base_mb || 0;
-        var curFile = last.host_file_mb || 0;
-        var effectiveHeadroom = ceiling - cache - curBase - curFile - forest;
+        const curBase = last.host_base_mb || 0;
+        const curFile = last.host_file_mb || 0;
+        const effectiveHeadroom = ceiling - cache - curBase - curFile - forest;
 
         // Warn if data spans a very short window (bulk loading skews time-based rates)
-        var shortWindow = spanDays < 0.5;  // less than 12 hours
+        const shortWindow = spanDays < 0.5;  // less than 12 hours
 
-        var proj = '';
+        let proj = '';
 
         // ── Memory capacity: doc-based (primary — immune to loading rate) ──
         if (marginalMemBytes > 0 && effectiveHeadroom > 0) {
-          var docsUntilCeiling = Math.round((effectiveHeadroom * 1048576) / marginalMemBytes);
-          var memConfidence = totalMemReg.r2;
-          var memConfLabel = memConfidence > 0.9 ? 'high' : memConfidence > 0.7 ? 'medium' : 'low';
-          var memConfClass = memConfidence > 0.9 ? 'good' : memConfidence > 0.7 ? 'warn' : 'crit';
-          var docClass = docsUntilCeiling < 500000 ? 'crit' : docsUntilCeiling < 2000000 ? 'warn' : 'good';
+          const docsUntilCeiling = Math.round((effectiveHeadroom * 1048576) / marginalMemBytes);
+          const memConfidence = totalMemReg.r2;
+          const memConfLabel = memConfidence > 0.9 ? 'high' : memConfidence > 0.7 ? 'medium' : 'low';
+          const memConfClass = memConfidence > 0.9 ? 'good' : memConfidence > 0.7 ? 'warn' : 'crit';
+          const docClass = docsUntilCeiling < 500000 ? 'crit' : docsUntilCeiling < 2000000 ? 'warn' : 'good';
 
           proj += '<div class="card"><div class="card-title">Memory Capacity</div>' +
             metric('Current headroom', fmt(effectiveHeadroom)) +
@@ -916,10 +916,10 @@ async function refreshDashboard() {
 
           // Time-based ETA: only show if window is long enough AND growth is positive
           if (!shortWindow && totalMemTimeReg.slope > 0) {
-            var daysUntilMem = effectiveHeadroom / totalMemTimeReg.slope;
-            var etaDate = new Date(Date.now() + daysUntilMem * 86400000);
-            var etaStr = etaDate.getFullYear() + '-' + String(etaDate.getMonth()+1).padStart(2,'0') + '-' + String(etaDate.getDate()).padStart(2,'0');
-            var runwayClass = daysUntilMem < 30 ? 'crit' : daysUntilMem < 90 ? 'warn' : 'good';
+            const daysUntilMem = effectiveHeadroom / totalMemTimeReg.slope;
+            const etaDate = new Date(Date.now() + daysUntilMem * 86400000);
+            const etaStr = etaDate.getFullYear() + '-' + String(etaDate.getMonth()+1).padStart(2,'0') + '-' + String(etaDate.getDate()).padStart(2,'0');
+            const runwayClass = daysUntilMem < 30 ? 'crit' : daysUntilMem < 90 ? 'warn' : 'good';
             proj += metric('Days until ceiling', '<span class="metric-val ' + runwayClass + '">' + Math.round(daysUntilMem) + ' days</span>', '') +
                     metric('ETA', etaStr);
           } else if (shortWindow) {
@@ -928,7 +928,7 @@ async function refreshDashboard() {
 
           proj += metric('Regression fit (R\u00b2)', '<span class="metric-val ' + memConfClass + '">' + memConfLabel + ' (' + memConfidence.toFixed(2) + ')</span>', '');
           // Data quality indicators
-          var dataQuality = rawCount + ' snapshots \u2192 ' + trend.length + ' deduped, ' + distinctLevels + ' distinct doc level' + (distinctLevels !== 1 ? 's' : '');
+          const dataQuality = rawCount + ' snapshots \u2192 ' + trend.length + ' deduped, ' + distinctLevels + ' distinct doc level' + (distinctLevels !== 1 ? 's' : '');
           if (spikeCount > 0) dataQuality += ', ' + spikeCount + ' merge spike' + (spikeCount !== 1 ? 's' : '') + ' excluded';
           proj += metric('Data quality', '<span style="color:#8b949e">' + dataQuality + '</span>');
           if (distinctLevels < 3) {
@@ -937,14 +937,14 @@ async function refreshDashboard() {
           proj += metric('Window', spanDays < 1 ? (spanDays*24).toFixed(1) + 'h' : spanDays.toFixed(1) + 'd') + '</div>';
 
           // ── Model accuracy: track projected ceiling vs reality ──
-          var projKey = 'mlca_proj_' + (selectedDb || 'Documents');
-          var projCeiling = last.documents + docsUntilCeiling;
+          const projKey = 'mlca_proj_' + (selectedDb || 'Documents');
+          const projCeiling = last.documents + docsUntilCeiling;
           // If we are past a previously stored ceiling, show accuracy
-          var storedProj = null;
+          let storedProj = null;
           try { storedProj = JSON.parse(localStorage.getItem(projKey)); } catch(e) {}
           if (storedProj && storedProj.ceiling && last.documents >= storedProj.ceiling) {
-            var overBy = last.documents - storedProj.ceiling;
-            var pctOff = Math.abs(overBy / storedProj.ceiling * 100);
+            const overBy = last.documents - storedProj.ceiling;
+            const pctOff = Math.abs(overBy / storedProj.ceiling * 100);
             proj += '<div class="card" style="border-color:#3fb950"><div class="card-title">Model Accuracy</div>' +
               metric('Projected ceiling', fmtNum(storedProj.ceiling) + ' docs') +
               metric('Actual at ceiling', fmtNum(last.documents) + ' docs') +
@@ -956,20 +956,20 @@ async function refreshDashboard() {
         }
 
         // ── Disk capacity ──
-        var diskRemain = Number((snap.database_status || {}).least_remaining_mb || 0);
+        const diskRemain = Number((snap.database_status || {}).least_remaining_mb || 0);
         if (marginalDiskBytes > 0 && diskRemain > 0) {
-          var docsUntilDiskFull = Math.round((diskRemain * 1048576) / marginalDiskBytes);
-          var diskDocClass = docsUntilDiskFull < 500000 ? 'crit' : docsUntilDiskFull < 2000000 ? 'warn' : 'good';
+          const docsUntilDiskFull = Math.round((diskRemain * 1048576) / marginalDiskBytes);
+          const diskDocClass = docsUntilDiskFull < 500000 ? 'crit' : docsUntilDiskFull < 2000000 ? 'warn' : 'good';
           proj += '<div class="card"><div class="card-title">Disk Capacity</div>' +
             metric('Remaining', fmt(diskRemain)) +
             metric('Disk/doc (regressed)', Math.round(marginalDiskBytes).toLocaleString() + ' bytes') +
             metric('Docs until full', '<span class="metric-val ' + diskDocClass + '">' + fmtNum(docsUntilDiskFull) + '</span>', '');
 
           if (!shortWindow && diskTimeReg.slope > 0) {
-            var daysUntilDisk = diskRemain / diskTimeReg.slope;
-            var diskEta = new Date(Date.now() + daysUntilDisk * 86400000);
-            var diskEtaStr = diskEta.getFullYear() + '-' + String(diskEta.getMonth()+1).padStart(2,'0') + '-' + String(diskEta.getDate()).padStart(2,'0');
-            var diskClass = daysUntilDisk < 30 ? 'crit' : daysUntilDisk < 90 ? 'warn' : 'good';
+            const daysUntilDisk = diskRemain / diskTimeReg.slope;
+            const diskEta = new Date(Date.now() + daysUntilDisk * 86400000);
+            const diskEtaStr = diskEta.getFullYear() + '-' + String(diskEta.getMonth()+1).padStart(2,'0') + '-' + String(diskEta.getDate()).padStart(2,'0');
+            const diskClass = daysUntilDisk < 30 ? 'crit' : daysUntilDisk < 90 ? 'warn' : 'good';
             proj += metric('Days until full', '<span class="metric-val ' + diskClass + '">' + Math.round(daysUntilDisk) + ' days</span>', '') +
                     metric('ETA', diskEtaStr);
           } else if (shortWindow) {
@@ -981,7 +981,7 @@ async function refreshDashboard() {
 
         // ── Document growth rate ──
         if (docsTimeReg.slope > 0) {
-          var growthNote = shortWindow ? ' <span style="color:#8b949e;font-size:11px">(bulk load window)</span>' : '';
+          const growthNote = shortWindow ? ' <span style="color:#8b949e;font-size:11px">(bulk load window)</span>' : '';
           proj += '<div class="card"><div class="card-title">Document Growth</div>' +
             metric('Current count', fmtNum(last.documents)) +
             metric('Growth rate (regressed)', fmtNum(Math.round(docsTimeReg.slope)) + '/day' + growthNote) +
@@ -1003,18 +1003,18 @@ async function refreshDashboard() {
 // Snapshots tab
 async function refreshSnapshots() {
   try {
-    var snaps = await (await fetch('/api/snapshots' + dbParam())).json();
+    const snaps = await (await fetch('/api/snapshots' + dbParam())).json();
     if (snaps.length === 0) {
       document.getElementById('snap-list').innerHTML = '<div class="loading">No snapshots found</div>';
       return;
     }
     snaps.reverse();
-    var tbl = '<table><tr><th>#</th><th>Timestamp</th><th>Database</th>' +
+    let tbl = '<table><tr><th>#</th><th>Timestamp</th><th>Database</th>' +
               '<th style="text-align:right">Documents</th><th style="text-align:right">Forest Disk</th>' +
               '<th style="text-align:right">RSS</th><th>Actions</th></tr>';
     snaps.forEach(function(s, i) {
-      var ts = (s.timestamp||'').substring(0,19).replace('T',' ');
-      var file = (s.file || '').replace(/[^A-Za-z0-9_.\\-]/g, '');
+      const ts = (s.timestamp||'').substring(0,19).replace('T',' ');
+      const file = (s.file || '').replace(/[^A-Za-z0-9_.\\-]/g, '');
       tbl += '<tr><td>' + (snaps.length - i) + '</td><td>' + ts + '</td><td>' + (s.database||'') + '</td>' +
              '<td class="num">' + fmtNum(s.documents) + '</td>' +
              '<td class="num">' + fmt(s.forest_disk_mb) + '</td>' +
@@ -1031,7 +1031,7 @@ async function refreshSnapshots() {
 
 async function viewSnapshot(filename) {
   try {
-    var data = await (await fetch('/api/snapshot/' + encodeURIComponent(filename))).json();
+    const data = await (await fetch('/api/snapshot/' + encodeURIComponent(filename))).json();
     document.getElementById('modal-title').textContent = filename;
     document.getElementById('modal-body').textContent = JSON.stringify(data, null, 2);
     document.getElementById('modal').classList.add('show');
@@ -1047,23 +1047,23 @@ document.getElementById('modal').addEventListener('click', function(e) {
 async function deleteSnapshot(filename) {
   if (!confirm('Delete snapshot ' + filename + '?')) return;
   try {
-    var resp = await fetch('/api/snapshots/' + encodeURIComponent(filename), { method: 'DELETE' });
+    const resp = await fetch('/api/snapshots/' + encodeURIComponent(filename), { method: 'DELETE' });
     if (resp.ok) refreshSnapshots();
     else alert('Delete failed: ' + (await resp.json()).error);
   } catch(e) { alert('Delete error: ' + e.message); }
 }
 
 async function takeSnapshot() {
-  var btn = document.getElementById('takeSnapshotBtn');
+  const btn = document.getElementById('takeSnapshotBtn');
   btn.disabled = true; btn.textContent = 'Collecting...';
   try {
-    var body = selectedDb ? JSON.stringify({database: selectedDb}) : '{}';
-    var resp = await fetch('/api/snapshot', {
+    const body = selectedDb ? JSON.stringify({database: selectedDb}) : '{}';
+    const resp = await fetch('/api/snapshot', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: body
     });
-    var result = await resp.json();
+    const result = await resp.json();
     if (resp.ok) {
       refreshSnapshots();
       loadDatabases();
@@ -1087,7 +1087,7 @@ document.getElementById('import-modal').addEventListener('click', function(e) {
 });
 
 async function doImport(snapJson) {
-  var resp = await fetch('/api/snapshots/import', {
+  const resp = await fetch('/api/snapshots/import', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: typeof snapJson === 'string' ? snapJson : JSON.stringify(snapJson)
@@ -1096,11 +1096,11 @@ async function doImport(snapJson) {
 }
 
 async function importPastedJson() {
-  var btn = document.getElementById('importPasteBtn');
-  var status = document.getElementById('import-status');
-  var raw = document.getElementById('import-json').value.trim();
+  const btn = document.getElementById('importPasteBtn');
+  const status = document.getElementById('import-status');
+  const raw = document.getElementById('import-json').value.trim();
   if (!raw) { status.innerHTML = '<span style="color:#f85149">Paste snapshot JSON first</span>'; return; }
-  var snap;
+  let snap;
   try { snap = JSON.parse(raw); } catch(e) {
     status.innerHTML = '<span style="color:#f85149">Invalid JSON: ' + e.message + '</span>';
     return;
@@ -1108,7 +1108,7 @@ async function importPastedJson() {
   btn.disabled = true; btn.textContent = 'Importing...';
   status.innerHTML = '';
   try {
-    var r = await doImport(snap);
+    const r = await doImport(snap);
     if (r.ok) {
       status.innerHTML = '<span style="color:#3fb950">Imported: ' + r.data.filename +
         ' (' + fmtNum(r.data.documents) + ' docs)</span>';
@@ -1122,47 +1122,47 @@ async function importPastedJson() {
 }
 
 async function importFiles(fileList) {
-  var ok = 0, fail = 0;
-  for (var i = 0; i < fileList.length; i++) {
+  let ok = 0, fail = 0;
+  for (let i = 0; i < fileList.length; i++) {
     try {
-      var text = await fileList[i].text();
-      var snap = JSON.parse(text);
-      var r = await doImport(snap);
+      const text = await fileList[i].text();
+      const snap = JSON.parse(text);
+      const r = await doImport(snap);
       if (r.ok) ok++; else fail++;
     } catch(e) { fail++; }
   }
   document.getElementById('import-file').value = '';
   if (ok > 0) { refreshSnapshots(); loadDatabases(); }
-  var msg = ok + ' snapshot(s) imported';
+  const msg = ok + ' snapshot(s) imported';
   if (fail > 0) msg += ', ' + fail + ' failed';
   alert(msg);
 }
 
 // Charts
 function drawChart(canvasId, points, yKey, color, yFmt) {
-  var canvas = document.getElementById(canvasId);
+  const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-  var rect = canvas.parentElement.getBoundingClientRect();
-  var dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
   canvas.width = (rect.width - 32) * dpr;
   canvas.height = 220 * dpr;
   canvas.style.width = (rect.width - 32) + 'px';
   canvas.style.height = '220px';
-  var ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
-  var W = rect.width - 32, H = 220;
-  var pad = {top: 10, right: 16, bottom: 35, left: 65};
-  var plotW = W - pad.left - pad.right, plotH = H - pad.top - pad.bottom;
+  const W = rect.width - 32, H = 220;
+  const pad = {top: 10, right: 16, bottom: 35, left: 65};
+  const plotW = W - pad.left - pad.right, plotH = H - pad.top - pad.bottom;
 
   if (points.length < 2) return;
 
-  var vals = points.map(function(p) { return p[yKey] || 0; });
-  var times = points.map(function(p) { return new Date(p.timestamp).getTime(); });
-  var yMin = Math.min.apply(null, vals), yMax = Math.max.apply(null, vals);
+  const vals = points.map(function(p) { return p[yKey] || 0; });
+  const times = points.map(function(p) { return new Date(p.timestamp).getTime(); });
+  const yMin = Math.min.apply(null, vals), yMax = Math.max.apply(null, vals);
   if (yMin === yMax) { yMin = yMin * 0.9; yMax = yMax * 1.1 || 1; }
-  var yRange = yMax - yMin;
-  var tMin = Math.min.apply(null, times), tMax = Math.max.apply(null, times);
-  var tRange = tMax - tMin || 1;
+  const yRange = yMax - yMin;
+  const tMin = Math.min.apply(null, times), tMax = Math.max.apply(null, times);
+  const tRange = tMax - tMin || 1;
 
   function xPos(t) { return pad.left + (t - tMin) / tRange * plotW; }
   function yPos(v) { return pad.top + plotH - (v - yMin) / yRange * plotH; }
@@ -1172,22 +1172,22 @@ function drawChart(canvasId, points, yKey, color, yFmt) {
 
   // Gridlines and Y labels
   ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
-  var ySteps = 5;
-  for (var i = 0; i <= ySteps; i++) {
-    var yy = pad.top + plotH * i / ySteps;
+  const ySteps = 5;
+  for (let i = 0; i <= ySteps; i++) {
+    const yy = pad.top + plotH * i / ySteps;
     ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(W - pad.right, yy); ctx.stroke();
     ctx.fillStyle = '#8b949e'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
-    var yVal = yMax - yRange * i / ySteps;
+    const yVal = yMax - yRange * i / ySteps;
     ctx.fillText(yFmt ? yFmt(yVal) : yVal.toFixed(0), pad.left - 6, yy + 4);
   }
 
   // X labels
   ctx.textAlign = 'center'; ctx.fillStyle = '#8b949e';
-  var xSteps = Math.min(points.length - 1, 6);
-  for (var i = 0; i <= xSteps; i++) {
-    var idx = Math.round(i * (points.length - 1) / xSteps);
-    var d = new Date(points[idx].timestamp);
-    var label = (d.getMonth()+1) + '/' + d.getDate() + ' ' +
+  const xSteps = Math.min(points.length - 1, 6);
+  for (let i = 0; i <= xSteps; i++) {
+    const idx = Math.round(i * (points.length - 1) / xSteps);
+    const d = new Date(points[idx].timestamp);
+    const label = (d.getMonth()+1) + '/' + d.getDate() + ' ' +
       String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
     ctx.fillText(label, xPos(times[idx]), H - 5);
   }
@@ -1195,15 +1195,15 @@ function drawChart(canvasId, points, yKey, color, yFmt) {
   // Line
   ctx.strokeStyle = color; ctx.lineWidth = 2;
   ctx.beginPath();
-  for (var i = 0; i < points.length; i++) {
-    var x = xPos(times[i]), y = yPos(vals[i]);
+  for (let i = 0; i < points.length; i++) {
+    const x = xPos(times[i]), y = yPos(vals[i]);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
 
   // Dots
   ctx.fillStyle = color;
-  for (var i = 0; i < points.length; i++) {
+  for (let i = 0; i < points.length; i++) {
     ctx.beginPath();
     ctx.arc(xPos(times[i]), yPos(vals[i]), 3, 0, Math.PI * 2);
     ctx.fill();
@@ -1212,7 +1212,7 @@ function drawChart(canvasId, points, yKey, color, yFmt) {
   // Area fill
   ctx.globalAlpha = 0.1; ctx.fillStyle = color;
   ctx.beginPath(); ctx.moveTo(xPos(times[0]), yPos(vals[0]));
-  for (var i = 1; i < points.length; i++) ctx.lineTo(xPos(times[i]), yPos(vals[i]));
+  for (let i = 1; i < points.length; i++) ctx.lineTo(xPos(times[i]), yPos(vals[i]));
   ctx.lineTo(xPos(times[points.length-1]), pad.top + plotH);
   ctx.lineTo(xPos(times[0]), pad.top + plotH);
   ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1.0;
@@ -1223,26 +1223,26 @@ function drawChart(canvasId, points, yKey, color, yFmt) {
 
 // Tooltip
 document.addEventListener('mousemove', function(e) {
-  var tooltip = document.getElementById('tooltip');
-  var canvas = e.target;
+  const tooltip = document.getElementById('tooltip');
+  const canvas = e.target;
   if (canvas.tagName !== 'CANVAS' || !canvas._chartData) { tooltip.style.display = 'none'; return; }
-  var cd = canvas._chartData;
-  var rect = canvas.getBoundingClientRect();
-  var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const cd = canvas._chartData;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   if (mx < cd.pad.left || mx > cd.W - cd.pad.right) { tooltip.style.display = 'none'; return; }
 
-  var closest = -1, closestDist = Infinity;
-  for (var i = 0; i < cd.times.length; i++) {
-    var dx = Math.abs(cd.xPos(cd.times[i]) - mx);
+  const closest = -1, closestDist = Infinity;
+  for (let i = 0; i < cd.times.length; i++) {
+    const dx = Math.abs(cd.xPos(cd.times[i]) - mx);
     if (dx < closestDist) { closestDist = dx; closest = i; }
   }
   if (closest < 0 || closestDist > 30) { tooltip.style.display = 'none'; return; }
-  var p = cd.points[closest];
-  var d = new Date(p.timestamp);
-  var dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' +
+  const p = cd.points[closest];
+  const d = new Date(p.timestamp);
+  const dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' +
     String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' +
     String(d.getMinutes()).padStart(2,'0');
-  var valStr = cd.yFmt ? cd.yFmt(cd.vals[closest]) : fmtNum(cd.vals[closest]);
+  const valStr = cd.yFmt ? cd.yFmt(cd.vals[closest]) : fmtNum(cd.vals[closest]);
   tooltip.innerHTML = '<div>' + dateStr + '</div><div style="color:#58a6ff;font-weight:bold">' + valStr + '</div>';
   tooltip.style.display = 'block';
   tooltip.style.left = (e.clientX + 12) + 'px';
@@ -1251,18 +1251,18 @@ document.addEventListener('mousemove', function(e) {
 
 async function refreshTrends() {
   try {
-    var points = await (await fetch('/api/trend' + dbParam())).json();
-    var empty = document.getElementById('trend-empty');
-    var charts = document.getElementById('charts');
+    const points = await (await fetch('/api/trend' + dbParam())).json();
+    const empty = document.getElementById('trend-empty');
+    const charts = document.getElementById('charts');
     if (points.length < 2) {
       empty.style.display = 'block'; charts.style.display = 'none'; return;
     }
     empty.style.display = 'none'; charts.style.display = 'grid';
 
     points.forEach(function(p) {
-      var sysTot = p.system_total_mb || 0;
-      var ceiling = sysTot * 0.8;
-      var fixed = (p.host_cache_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
+      const sysTot = p.system_total_mb || 0;
+      const ceiling = sysTot * 0.8;
+      const fixed = (p.host_cache_mb||0) + (p.host_base_mb||0) + (p.host_file_mb||0);
       p.ceiling_pct = ceiling > 0 ? ((fixed + (p.host_forest_mb||0)) / ceiling * 100) : 0;
     });
 
