@@ -56,7 +56,7 @@ const cluster = {
 try {
   let serverCount = 0;
   const groups = Array.from(xdmp.groups());
-  for (var g = 0; g < groups.length; g++) {
+  for (let g = 0; g < groups.length; g++) {
     serverCount += fn.count(xdmp.groupServers(groups[g]));
   }
   cluster.servers = serverCount;
