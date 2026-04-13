@@ -320,9 +320,9 @@ def flux_import_phase(flux_url, jsonl_str, ml_host, ml_app_port,
 
 _CLEANUP_JS = """
 declareUpdate();
-var deleted = 0;
-var uris = cts.uriMatch(prefix + '*').toArray();
-for (var i = 0; i < uris.length; i++) {
+let deleted = 0;
+const uris = cts.uriMatch(prefix + '*').toArray();
+for (let i = 0; i < uris.length; i++) {
   xdmp.documentDelete(uris[i]);
   deleted++;
 }

@@ -149,13 +149,13 @@ def collect_forest_counts(client, database):
 
 
 _INDEX_MEMORY_JS = """
-var db = xdmp.database(dbName);
+const db = xdmp.database(dbName);
 
 // 1. Get all index definitions with their IDs
-var indexDefs = xdmp.databaseDescribeIndexes(db).toObject();
-var allIndexes = [];
+const indexDefs = xdmp.databaseDescribeIndexes(db).toObject();
+const allIndexes = [];
 Object.keys(indexDefs).forEach(function(type) {
-  var items = indexDefs[type];
+  const items = indexDefs[type];
   if (!Array.isArray(items)) items = [items];
   items.forEach(function(idx) {
     if (idx.indexId) {
@@ -166,18 +166,18 @@ Object.keys(indexDefs).forEach(function(type) {
 });
 
 // 2. Get forest statuses with memoryDetail
-var forests = xdmp.databaseForests(db);
-var statuses = xdmp.forestStatus(forests, 'memoryDetail').toArray();
+const forests = xdmp.databaseForests(db);
+const statuses = xdmp.forestStatus(forests, 'memoryDetail').toArray();
 
 // 3. Aggregate per-index memory and disk across all stands
-var indexTotals = {};
-var standSummaries = [];
+const indexTotals = {};
+const standSummaries = [];
 
 statuses.forEach(function(statusNode) {
-  var s = statusNode.toObject();
-  var stands = s.stands;
+  const s = statusNode.toObject();
+  const stands = s.stands;
   if (!stands) return;
-  var standArr = Array.isArray(stands) ? stands : [stands];
+  const standArr = Array.isArray(stands) ? stands : [stands];
   standArr.forEach(function(stand) {
     if (stand.memorySummary) {
       standSummaries.push({
@@ -188,11 +188,11 @@ statuses.forEach(function(statusNode) {
       });
     }
     if (stand.memoryDetail && stand.memoryDetail.memoryRangeIndexes) {
-      var indexes = stand.memoryDetail.memoryRangeIndexes.index;
+      let indexes = stand.memoryDetail.memoryRangeIndexes.index;
       if (!indexes) return;
       if (!Array.isArray(indexes)) indexes = [indexes];
       indexes.forEach(function(idx) {
-        var id = String(idx.indexId);
+        const id = String(idx.indexId);
         if (!indexTotals[id]) indexTotals[id] = { memBytes: 0, diskBytes: 0 };
         indexTotals[id].memBytes += (idx.indexMemoryBytes || 0);
         indexTotals[id].diskBytes += (idx.indexOnDiskBytes || 0);
@@ -202,8 +202,8 @@ statuses.forEach(function(statusNode) {
 });
 
 // 4. Join
-var report = allIndexes.map(function(def) {
-  var totals = indexTotals[String(def.indexId)] || { memBytes: 0, diskBytes: 0 };
+const report = allIndexes.map(function(def) {
+  const totals = indexTotals[String(def.indexId)] || { memBytes: 0, diskBytes: 0 };
   return {
     indexType: def.indexType,
     localname: def.localname || null,
@@ -216,6 +216,6 @@ var report = allIndexes.map(function(def) {
   };
 });
 
-var result = { indexes: report, standSummaries: standSummaries };
+const result = { indexes: report, standSummaries: standSummaries };
 result;
 """

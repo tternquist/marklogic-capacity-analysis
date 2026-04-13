@@ -55,7 +55,7 @@ URI_PREFIX = "/capacity-test/"
 BATCH_INSERT_JS = """
 declareUpdate();
 
-var words = [
+const words = [
   'cluster','forest','index','fragment','stand','merge','shard',
   'document','query','search','cache','memory','disk','scale',
   'capacity','replication','backup','restore','journal','lock',
@@ -63,44 +63,45 @@ var words = [
   'namespace','collection','permission','role','user','host',
   'server','group','partition','replica','failover','index','node'
 ];
-var categories = ['alpha','beta','gamma','delta','epsilon','zeta'];
-var statuses   = ['active','inactive','pending','archived','draft'];
+const categories = ['alpha','beta','gamma','delta','epsilon','zeta'];
+const statuses   = ['active','inactive','pending','archived','draft'];
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 function randStr(n) {
-  var s = '', chars = 'abcdefghijklmnopqrstuvwxyz';
-  for (var i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  let s = '';
+  const chars = 'abcdefghijklmnopqrstuvwxyz';
+  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
 
 function randSentence(min, max) {
-  var n = min + Math.floor(Math.random() * (max - min + 1));
-  var out = [];
-  for (var i = 0; i < n; i++) out.push(pick(words));
+  const n = min + Math.floor(Math.random() * (max - min + 1));
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(pick(words));
   return out.join(' ');
 }
 
 function randDate() {
-  var y = 2018 + Math.floor(Math.random() * 9);
-  var m = 1  + Math.floor(Math.random() * 12);
-  var d = 1  + Math.floor(Math.random() * 28);
+  const y = 2018 + Math.floor(Math.random() * 9);
+  const m = 1  + Math.floor(Math.random() * 12);
+  const d = 1  + Math.floor(Math.random() * 28);
   return y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0');
 }
 
-var inserted = 0;
-var perms = [
+let inserted = 0;
+const perms = [
   xdmp.permission('rest-reader', 'read'),
   xdmp.permission('rest-writer', 'update')
 ];
 
-for (var i = 0; i < count; i++) {
-  var id = offset + i;
-  var sizeRoll = Math.random();
+for (let i = 0; i < count; i++) {
+  const id = offset + i;
+  const sizeRoll = Math.random();
   // 25% small, 60% medium, 15% large
-  var sizeClass = sizeRoll < 0.25 ? 'small' : sizeRoll < 0.85 ? 'medium' : 'large';
+  const sizeClass = sizeRoll < 0.25 ? 'small' : sizeRoll < 0.85 ? 'medium' : 'large';
 
-  var doc = {
+  const doc = {
     id:        'cap-test-' + String(id).padStart(10, '0'),
     category:  pick(categories),
     status:    pick(statuses),
@@ -129,11 +130,11 @@ for (var i = 0; i < count; i++) {
                   Math.floor(Math.random()*10) + '.' +
                   Math.floor(Math.random()*20);
     doc.attrs   = {};
-    var nAttrs  = 3 + Math.floor(Math.random() * 6);
-    for (var a = 0; a < nAttrs; a++) doc.attrs[randStr(5)] = randStr(10);
+    const nAttrs  = 3 + Math.floor(Math.random() * 6);
+    for (let a = 0; a < nAttrs; a++) doc.attrs[randStr(5)] = randStr(10);
     doc.history = [];
-    var nHist   = 2 + Math.floor(Math.random() * 5);
-    for (var h = 0; h < nHist; h++) {
+    const nHist   = 2 + Math.floor(Math.random() * 5);
+    for (let h = 0; h < nHist; h++) {
       doc.history.push({ date: randDate(), action: pick(statuses) });
     }
   }
@@ -262,7 +263,7 @@ def sample_metrics(client, database):
 
 CLEANUP_JS = """
 declareUpdate();
-var deleted = 0;
+let deleted = 0;
 cts.uriMatch(prefix + '*').toArray().forEach(function(u) {
   xdmp.documentDelete(u);
   deleted++;
