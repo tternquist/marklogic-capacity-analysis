@@ -33,131 +33,30 @@ def service_with_auth(tmp_path):
 
 
 def _start_service(tmp_path, api_token=None):
-    """Start a test HTTP service and return (conn, port, tmp_path)."""
-    import threading
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    """Start a test HTTP service and return (conn, port, tmp_path).
 
-    # Save a snapshot file for the service to find
+    Uses the real :class:`MLCAHandler` via :class:`MLCAServer` with a
+    :class:`ServiceContext`. Silences per-request access logs.
+    """
+    from ml_capacity.service import MLCAHandler, MLCAServer, ServiceContext
+
     original_dir = snap_mod.SNAPSHOT_DIR
     snap_mod.SNAPSHOT_DIR = tmp_path
     snap = _make_snapshot()
     mc.save_snapshot(snap)
 
-    # We need to set up the handler similar to run_service but simplified
-    latest_snapshots = {"Documents": snap}
-    lock = threading.Lock()
+    ctx = ServiceContext(
+        client=MagicMock(),
+        databases=["Documents"],
+        api_token=api_token,
+    )
+    ctx.latest_snapshots["Documents"] = snap
 
-    class TestHandler(BaseHTTPRequestHandler):
+    class SilentHandler(MLCAHandler):
         def log_message(self, format, *args):
             pass
 
-        def _check_auth(self):
-            if not api_token:
-                return True
-            path, _ = self._parse_request()
-            if path == "/health":
-                return True
-            auth = self.headers.get("Authorization", "")
-            if auth == f"Bearer {api_token}":
-                return True
-            self.send_response(401)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"error":"Unauthorized"}')
-            return False
-
-        def _add_cors_headers(self):
-            origin = self.headers.get("Origin", "")
-            if api_token:
-                if origin:
-                    self.send_header("Access-Control-Allow-Origin", origin)
-                    self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods",
-                             "GET, POST, DELETE, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers",
-                             "Content-Type, Authorization")
-
-        def _parse_request(self):
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-            return parsed.path, params
-
-        def _respond(self, code, content_type, body):
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self._add_cors_headers()
-            self.end_headers()
-            self.wfile.write(body.encode() if isinstance(body, str) else body)
-
-        def do_GET(self):
-            if not self._check_auth():
-                return
-            path, params = self._parse_request()
-            if path == "/health":
-                self._respond(200, "application/json", '{"status":"ok"}')
-            elif path == "/api/snapshot":
-                with lock:
-                    db = params.get("database", ["Documents"])[0]
-                    s = latest_snapshots.get(db)
-                if s:
-                    self._respond(200, "application/json",
-                                  json.dumps(s, default=str))
-                else:
-                    self._respond(404, "application/json",
-                                  '{"error":"No snapshot"}')
-            elif path.startswith("/api/snapshot/"):
-                filename = path[len("/api/snapshot/"):]
-                if ".." in filename or "/" in filename \
-                        or not filename.endswith(".json"):
-                    self._respond(400, "application/json",
-                                  '{"error":"Invalid filename"}')
-                    return
-                fpath = snap_mod.SNAPSHOT_DIR / filename
-                if not fpath.exists():
-                    self._respond(404, "application/json",
-                                  '{"error":"Not found"}')
-                    return
-                with open(fpath) as f:
-                    data = json.load(f)
-                self._respond(200, "application/json",
-                              json.dumps(data, default=str))
-            elif path == "/metrics":
-                with lock:
-                    text = ""
-                    for db, s in latest_snapshots.items():
-                        text += mc.snapshot_to_prometheus(s)
-                self._respond(200, "text/plain", text)
-            else:
-                self._respond(404, "text/plain", "Not Found")
-
-        def do_DELETE(self):
-            if not self._check_auth():
-                return
-            path, _ = self._parse_request()
-            if path.startswith("/api/snapshots/"):
-                filename = path[len("/api/snapshots/"):]
-                if ".." in filename or "/" in filename \
-                        or not filename.endswith(".json"):
-                    self._respond(400, "application/json",
-                                  '{"error":"Invalid filename"}')
-                    return
-                fpath = snap_mod.SNAPSHOT_DIR / filename
-                if not fpath.exists():
-                    self._respond(404, "application/json",
-                                  '{"error":"Not found"}')
-                    return
-                fpath.unlink()
-                self._respond(200, "application/json", '{"status":"deleted"}')
-            else:
-                self._respond(404, "text/plain", "Not Found")
-
-        def do_OPTIONS(self):
-            self.send_response(200)
-            self._add_cors_headers()
-            self.end_headers()
-
-    server = HTTPServer(("127.0.0.1", 0), TestHandler)
+    server = MLCAServer(("127.0.0.1", 0), SilentHandler, ctx)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

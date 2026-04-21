@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import ml_capacity as mc
+from ml_capacity.config_drift import _values_match
 from tests.conftest import _make_snapshot
 
 
@@ -38,26 +39,26 @@ class TestExtractConfigFingerprint:
 
 class TestValuesMatch:
     def test_exact_equal(self):
-        assert mc._values_match(42, 42) is True
+        assert _values_match(42, 42) is True
 
     def test_none_always_matches(self):
-        assert mc._values_match(None, 42) is True
-        assert mc._values_match(42, None) is True
+        assert _values_match(None, 42) is True
+        assert _values_match(42, None) is True
 
     def test_zero_always_matches(self):
-        assert mc._values_match(0, 42) is True
+        assert _values_match(0, 42) is True
 
     def test_different_values_no_tolerance(self):
-        assert mc._values_match(3, 5, "range_element_indexes") is False
+        assert _values_match(3, 5, "range_element_indexes") is False
 
     def test_fuzzy_mb_within_tolerance(self):
-        assert mc._values_match(5120, 5121, "cache_alloc_mb") is True
+        assert _values_match(5120, 5121, "cache_alloc_mb") is True
 
     def test_fuzzy_mb_outside_tolerance(self):
-        assert mc._values_match(5120, 5200, "cache_alloc_mb") is False
+        assert _values_match(5120, 5200, "cache_alloc_mb") is False
 
     def test_non_fuzzy_field_exact(self):
-        assert mc._values_match(3, 4, "forest_count") is False
+        assert _values_match(3, 4, "forest_count") is False
 
 
 class TestCheckConfigDrift:

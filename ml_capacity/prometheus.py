@@ -2,8 +2,10 @@ import json
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
+from ml_capacity.types import Snapshot
 
-def snapshot_to_prometheus(snap):
+
+def snapshot_to_prometheus(snap: Snapshot) -> str:
     """Convert a snapshot to Prometheus text exposition format.
 
     Returns a string of Prometheus-format metrics. Works for both

@@ -34,10 +34,11 @@ import getpass
 import json
 import sys
 import time
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-# Re-use the client from ml_capacity
-sys.path.insert(0, ".")
+# Re-use the client from ml_capacity (repo root is this file's parent's parent).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ml_capacity import (
     MarkLogicClient,
     fmt_mb, color, header, sub_header, kv, bar, status_badge,

@@ -7,15 +7,16 @@ from ml_capacity.formatting import color, header, sub_header, kv, fmt_mb, BOLD, 
 from ml_capacity.collect import (
     collect_cluster_overview, collect_database_status,
     collect_database_properties, collect_host_memory,
-    collect_forest_counts, _INDEX_MEMORY_JS,
+    collect_forest_counts, INDEX_MEMORY_JS,
 )
+from ml_capacity.types import Snapshot
 
 log = logging.getLogger("mlca")
 
 SNAPSHOT_DIR = Path(__file__).parent.parent / ".ml-capacity"
 
 
-def collect_snapshot(client, database):
+def collect_snapshot(client, database: str) -> Snapshot:
     """Gather all capacity metrics into a single JSON-serializable dict.
 
     This is the canonical snapshot format — everything the report sections
@@ -112,7 +113,7 @@ def collect_snapshot(client, database):
 
     # Index memory (via eval — ML 11+)
     try:
-        idx_results = client.eval_javascript(_INDEX_MEMORY_JS, database=database,
+        idx_results = client.eval_javascript(INDEX_MEMORY_JS, database=database,
                                              vars={"dbName": database})
         if idx_results:
             snap["index_memory"] = idx_results[0]
@@ -156,7 +157,7 @@ def collect_snapshot(client, database):
     return snap
 
 
-def save_snapshot(snap):
+def save_snapshot(snap: Snapshot):
     """Save a snapshot to .ml-capacity/ as a timestamped JSON file."""
     SNAPSHOT_DIR.mkdir(exist_ok=True)
     ts = snap["timestamp"].replace(":", "").replace("-", "")[:15]

@@ -423,7 +423,7 @@ to run in minutes rather than hours.
 
 ### Validation: Disk Scaling Linearity
 
-**Script**: `ml_capacity_test.py`
+**Script**: `tools/ml_capacity_test.py`
 
 Loads 500K+ documents in batches of 50K, takes metrics after each batch,
 and runs linear regression on `disk_size ~ doc_count`.
@@ -946,20 +946,20 @@ The pre-built dashboard includes:
 
 ## Scaling Validation Test
 
-`ml_capacity_test.py` validates the capacity model by loading documents and
+`tools/ml_capacity_test.py` validates the capacity model by loading documents and
 measuring how metrics actually scale:
 
 ```bash
 # Default: 10 batches x 50,000 docs = 500,000 documents
-python3 ml_capacity_test.py --host ml.example.com --user admin --password secret \
+python3 tools/ml_capacity_test.py --host ml.example.com --user admin --password secret \
     --auth-type basic
 
 # Smaller test run
-python3 ml_capacity_test.py --host ml.example.com --user admin --password secret \
+python3 tools/ml_capacity_test.py --host ml.example.com --user admin --password secret \
     --auth-type basic --batches 5 --batch-size 10000
 
 # Keep test documents after the run
-python3 ml_capacity_test.py --host ml.example.com --user admin --password secret \
+python3 tools/ml_capacity_test.py --host ml.example.com --user admin --password secret \
     --auth-type basic --no-cleanup
 ```
 
@@ -995,16 +995,16 @@ produces multiple flushes and an R² above 0.95.
 
 ## Stress Test
 
-`ml_capacity_stress.py` is a one-time test that loads documents toward the
+`tools/ml_capacity_stress.py` is a one-time test that loads documents toward the
 projected memory ceiling to validate capacity projections:
 
 ```bash
 # Default: load to 75% of projected ceiling in 100K-doc waves
-python3 ml_capacity_stress.py --host ml.example.com --user admin --password secret \
+python3 tools/ml_capacity_stress.py --host ml.example.com --user admin --password secret \
     --auth-type basic
 
 # Adjust target percentage or wave size
-python3 ml_capacity_stress.py --host ml.example.com --user admin --password secret \
+python3 tools/ml_capacity_stress.py --host ml.example.com --user admin --password secret \
     --auth-type basic --target-pct 50 --wave-size 50000
 ```
 
@@ -1036,9 +1036,10 @@ projected per-document costs.
 
 ```
 ml-capacity/
-  ml_capacity.py                 # CLI + service mode (--serve)
-  ml_capacity_test.py            # Scaling validation test
-  ml_capacity_stress.py          # One-time stress test
+  ml_capacity/                   # Package (CLI + service mode via `python -m ml_capacity`)
+  tools/
+    ml_capacity_test.py          # Scaling validation test
+    ml_capacity_stress.py        # One-time stress test
   scripts/
     collect-snapshot.sjs         # SJS script for disconnected snapshot collection
   Dockerfile                     # MLCA service container

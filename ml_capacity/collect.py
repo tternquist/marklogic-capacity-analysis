@@ -148,7 +148,7 @@ def collect_forest_counts(client, database):
     return client.eval_xquery(xquery, database=database)
 
 
-_INDEX_MEMORY_JS = """
+INDEX_MEMORY_JS = """
 var db = xdmp.database(dbName);
 
 // 1. Get all index definitions with their IDs

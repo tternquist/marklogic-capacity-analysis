@@ -5,11 +5,12 @@ from ml_capacity.formatting import (
 from ml_capacity.collect import (
     collect_cluster_overview, collect_database_status,
     collect_database_properties, collect_host_memory,
-    collect_forest_counts, _INDEX_MEMORY_JS,
+    collect_forest_counts, INDEX_MEMORY_JS,
 )
 
 
 def report_cluster(client):
+    """Print a summary of the cluster's name, version, and headline object counts."""
     header("CLUSTER OVERVIEW")
     data = collect_cluster_overview(client)
     cluster = data.get("local-cluster-default", {})
@@ -25,6 +26,10 @@ def report_cluster(client):
 
 
 def report_host_memory(client):
+    """Print per-host RAM breakdown (system, cache, forest, base, file) with headroom.
+
+    Returns a list of host dicts for downstream use, or ``None`` if eval is disabled.
+    """
     header("HOST MEMORY")
     try:
         results = collect_host_memory(client)
@@ -130,6 +135,7 @@ def report_host_memory(client):
 
 
 def report_database_stats(client, database):
+    """Print document/fragment counts and disk/memory totals for one database."""
     header(f"DATABASE: {database}")
     data = collect_database_status(client, database)
     status = data.get("database-status", {})
@@ -179,6 +185,7 @@ def report_database_stats(client, database):
 
 
 def report_forest_health(client, database):
+    """Print per-forest stand counts, state, and merge/reindex status for one database."""
     header(f"FOREST HEALTH: {database}")
 
     try:
@@ -249,6 +256,7 @@ def report_forest_health(client, database):
 
 
 def report_index_config(client, database):
+    """Print the configured index set for a database (range, word, path, etc.)."""
     header(f"INDEX CONFIGURATION: {database}")
     props = collect_database_properties(client, database)
 
@@ -323,6 +331,7 @@ def report_index_config(client, database):
 
 
 def report_index_memory(client, database):
+    """Print per-index memory usage for the given database with range-index detail."""
     """Per-index memory and disk usage using xdmp.forestStatus('memoryDetail').
 
     Requires MarkLogic 11+ and ML_ALLOW_EVAL=true.
@@ -356,7 +365,7 @@ def report_index_memory(client, database):
         print()
 
     try:
-        results = client.eval_javascript(_INDEX_MEMORY_JS, database=database,
+        results = client.eval_javascript(INDEX_MEMORY_JS, database=database,
                                          vars={"dbName": database})
         if not results:
             print("    Could not retrieve index memory data")
@@ -494,6 +503,11 @@ def report_index_memory(client, database):
 
 def report_capacity_estimate(database, db_props, forest_data, host_data,
                              remaining_disk_mb=0):
+    """Project headroom: derive per-doc disk/memory, then report docs-until-ceiling.
+
+    Inputs come from :mod:`ml_capacity.collect` (pre-collected to avoid refetch);
+    output is printed to stdout alongside a human-readable projection summary.
+    """
     header(f"CAPACITY ESTIMATE: {database}")
 
     if not forest_data:

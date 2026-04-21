@@ -22,13 +22,13 @@ import getpass
 import json
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ml_capacity import (
     MarkLogicClient, collect_snapshot, save_snapshot,
     fmt_mb, color, header, sub_header, kv, bar, status_badge,
     BOLD, CYAN, GREEN, RED, YELLOW, DIM, RESET,
-    _INDEX_MEMORY_JS,
 )
 
 COLLECTION = "stress-test"
