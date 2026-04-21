@@ -252,7 +252,7 @@ async function refreshDashboard() {
     var t = snap.totals || {};
     var db = snap.database || '?';
     var ts = (snap.timestamp || '').substring(0,19).replace('T',' ');
-    document.getElementById('subtitle').textContent = db + ' \\u2014 ' + ts;
+    document.getElementById('subtitle').textContent = db + ' — ' + ts;
 
     var sysTot = t.system_total_mb || 0;
     var cache = t.host_cache_mb || 0, base = t.host_base_mb || 0;
@@ -605,13 +605,13 @@ async function refreshSnapshots() {
               '<th style="text-align:right">RSS</th><th>Actions</th></tr>';
     snaps.forEach(function(s, i) {
       var ts = (s.timestamp||'').substring(0,19).replace('T',' ');
-      var file = (s.file || '').replace(/[^A-Za-z0-9_.\\-]/g, '');
+      var file = (s.file || '').replace(/[^A-Za-z0-9_.\-]/g, '');
       tbl += '<tr><td>' + (snaps.length - i) + '</td><td>' + ts + '</td><td>' + (s.database||'') + '</td>' +
              '<td class="num">' + fmtNum(s.documents) + '</td>' +
              '<td class="num">' + fmt(s.forest_disk_mb) + '</td>' +
              '<td class="num">' + fmt(s.host_rss_mb) + '</td>' +
-             '<td><button class="btn" onclick="viewSnapshot(\\'' + file + '\\')">View</button> ' +
-             '<button class="btn btn-danger" onclick="deleteSnapshot(\\'' + file + '\\')">Delete</button></td></tr>';
+             '<td><button class="btn" onclick="viewSnapshot(\'' + file + '\')">View</button> ' +
+             '<button class="btn btn-danger" onclick="deleteSnapshot(\'' + file + '\')">Delete</button></td></tr>';
     });
     tbl += '</table>';
     document.getElementById('snap-list').innerHTML = tbl;
