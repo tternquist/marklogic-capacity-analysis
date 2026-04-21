@@ -1,8 +1,10 @@
 """Shared fixtures for MLCA unit and API tests."""
 
 import json
-import pytest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 
 def _make_snapshot(database="Documents", docs=100000, disk_mb=500, mem_mb=200,
@@ -155,19 +157,25 @@ def snapshot_pair():
 
 @pytest.fixture
 def tmp_snapshot_dir(tmp_path):
-    """Create a temp snapshot dir with some snapshot files."""
+    """Create a temp snapshot dir with some snapshot files.
+
+    Timestamps are relative to now so that prune/retention tests are
+    deterministic regardless of when they run: two snapshots older than
+    one day and one recent snapshot.
+    """
     import ml_capacity.snapshot as snap_mod
     original_dir = snap_mod.SNAPSHOT_DIR
     snap_mod.SNAPSHOT_DIR = tmp_path
 
-    # Create a few snapshot files
-    for i, (ts, docs) in enumerate([
-        ("20260408T100000", 100000),
-        ("20260409T100000", 150000),
-        ("20260410T100000", 200000),
-    ]):
-        snap = _make_snapshot(docs=docs, timestamp=f"2026-04-{8+i:02d}T10:00:00+00:00")
-        fname = f"{ts}_Documents.json"
+    now = datetime.now(timezone.utc)
+    for offset, docs in [
+        (timedelta(days=3), 100000),
+        (timedelta(days=2), 150000),
+        (timedelta(minutes=10), 200000),
+    ]:
+        t = now - offset
+        snap = _make_snapshot(docs=docs, timestamp=t.isoformat())
+        fname = f"{t.strftime('%Y%m%dT%H%M%S')}_Documents.json"
         with open(tmp_path / fname, "w") as f:
             json.dump(snap, f)
 
